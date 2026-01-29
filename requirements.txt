@@ -1,0 +1,9 @@
+streamlit>=1.33
+pandas>=1.5
+numpy>=1.23
+scikit-learn>=1.2
+altair>=5.0
+matplotlib>=3.7
+xgboost>=2.0 ; platform_system != "Darwin" or platform_machine != "arm64"
+statsmodels==0.14.4
+scipy==1.14.1
