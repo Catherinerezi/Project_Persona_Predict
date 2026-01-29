@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Jupyter/Colab
+.ipynb_checkpoints/
+*.ipynb
+
+# OS/macOS
+.DS_Store
+
+# Env/Secrets
+.env
