@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # streamlit_app.py
 # Persona Predict — Streamlit (Altair)
 # Notes for large data:
@@ -29,6 +28,23 @@ st.set_page_config(page_title="Persona Predict", layout="wide")
 alt.data_transformers.disable_max_rows()
 
 YES_PATTERN = re.compile(r"\b(ya|y|yes|sudah|tersalur|placed|berhasil)\b", re.I)
+
+import io
+import requests
+
+def normalize_drive_url(url: str) -> str:
+    m = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
+    if m:
+        file_id = m.group(1)
+        return f"https://drive.google.com/uc?export=download&id={file_id}"
+    return url
+
+@st.cache_data(show_spinner=False)
+def read_csv_from_url(url: str) -> pd.DataFrame:
+    url = normalize_drive_url(url)
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    return pd.read_csv(io.BytesIO(r.content))
 
 
 # ----------------------------
@@ -278,20 +294,35 @@ st.title("Persona Predict — Streamlit (Altair)")
 
 with st.sidebar:
     st.header("Data source")
-    opts = ["Upload file (CSV/XLSX)"] + (["Google Sheets"] if has_gsheets() else [])
+
+    opts = ["Upload file (CSV/XLSX)", "URL (CSV)"] + (["Google Sheets"] if has_gsheets() else [])
     source = st.radio("Choose", opts)
 
     df_raw: Optional[pd.DataFrame] = None
-    if source.startswith("Upload"):
+
+    if source == "Upload file (CSV/XLSX)":
         f = st.file_uploader("Upload CSV/XLSX", type=["csv", "xlsx", "xls"])
         if f is not None:
             df_raw = read_uploaded(f)
-    else:
+
+    elif source == "URL (CSV)":
+        url = st.text_input("CSV direct URL (Drive/Dropbox/S3)")
+        st.caption("Tip (Drive): use https://drive.google.com/uc?export=download&id=FILE_ID")
+        if url:
+            try:
+                df_raw = read_csv_from_url(url)
+            except Exception as e:
+                st.error(f"Failed to load CSV from URL: {e}")
+
+    else:  # Google Sheets
         st.caption("Set `gcp_service_account` in Streamlit secrets.")
         sheet_id = st.text_input("Sheet ID")
         worksheet = st.text_input("Worksheet", value="Sheet1")
         if sheet_id and worksheet:
-            df_raw = read_gsheet(sheet_id, worksheet)
+            try:
+                df_raw = read_gsheet(sheet_id, worksheet)
+            except Exception as e:
+                st.error(f"Failed to read Google Sheet: {e}")
 
     st.divider()
     st.header("Big data controls")
@@ -309,7 +340,7 @@ with st.sidebar:
     test_size = st.slider("test_size", 0.05, 0.5, 0.2)
 
 if df_raw is None:
-    st.info("Upload dataset or connect Google Sheets.")
+    st.info("Upload dataset, paste URL CSV, or connect Google Sheets.")
     st.stop()
 
 df = safe_fe(df_raw.copy())
