@@ -1,11 +1,9 @@
 # streamlit_app.py
-# Persona Predict — Streamlit (Altair)
-# NO LFS logic, NO requests, NO Google Drive / GSheets. Repo/Upload only.
-
+# Persona Predict — Streamlit (Altair) — NO Drive/requests, NO LFS requirement
 from __future__ import annotations
 
-import itertools
 import re
+import itertools
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -29,21 +27,19 @@ alt.data_transformers.disable_max_rows()
 
 YES_PATTERN = re.compile(r"\b(ya|y|yes|sudah|tersalur|placed|berhasil)\b", re.I)
 
-# =========================================================
-# Data loading (Repo / Upload) — NO Drive/requests
-# =========================================================
+
+# ----------------------------
+# Repo-aware data loader (like marketing AB) — NO Drive/requests
+# ----------------------------
 def _repo_root_from_file() -> Path:
-    """
-    Streamlit Cloud biasanya:
-      /mount/src/<repo>/<subfolder>/<script>.py
-    Kalau script kamu ada di /app/, repo_root = parents[1].
-    """
     script_path = Path(__file__).resolve()
+    # kalau script ada di /app/, repo_root = parents[1]
     return script_path.parents[1]
 
 
 def _is_probably_table(p: Path) -> bool:
-    return p.name.lower().endswith((".csv", ".csv.gz", ".gz", ".xlsx", ".xls"))
+    n = p.name.lower()
+    return n.endswith((".csv", ".csv.gz", ".gz", ".xlsx", ".xls"))
 
 
 def sniff_file_head(path: Path, n_lines: int = 10) -> str:
@@ -52,32 +48,31 @@ def sniff_file_head(path: Path, n_lines: int = 10) -> str:
         name = path.name.lower()
         if name.endswith(".csv.gz") or name.endswith(".gz"):
             import gzip
-
             with gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
                 return "".join(itertools.islice(f, n_lines))
-        if name.endswith(".csv"):
+        elif name.endswith(".csv"):
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 return "".join(itertools.islice(f, n_lines))
-        return "[head skipped: not a text csv/gz]"
+        else:
+            return "[preview head only for CSV/GZ]"
     except Exception as e:
         return f"[Gagal baca head: {e}]"
 
 
 def read_table(path: Path) -> pd.DataFrame:
-    """Loader robust: auto delimiter, handle gzip, skip bad lines."""
     name = path.name.lower()
 
     if name.endswith((".xlsx", ".xls")):
         return pd.read_excel(path)
 
     if name.endswith(".csv"):
+        # delimiter auto detect -> engine python; jangan pakai low_memory (error di python engine)
         return pd.read_csv(
             path,
             sep=None,
             engine="python",
             encoding_errors="replace",
             on_bad_lines="skip",
-            low_memory=False,
         )
 
     if name.endswith(".csv.gz") or name.endswith(".gz"):
@@ -88,20 +83,13 @@ def read_table(path: Path) -> pd.DataFrame:
             engine="python",
             encoding_errors="replace",
             on_bad_lines="skip",
-            low_memory=False,
         )
 
     raise ValueError(f"Format tidak didukung: {path.name}")
 
 
-@st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=False)
 def scan_repo_files() -> tuple[str, str, list[str]]:
-    """
-    Return:
-      - script_path
-      - repo_root
-      - rel paths for candidate data files
-    """
     script_path = Path(__file__).resolve()
     repo_root = _repo_root_from_file()
 
@@ -120,21 +108,8 @@ def scan_repo_files() -> tuple[str, str, list[str]]:
     return str(script_path), str(repo_root), rels
 
 
-@st.cache_data(show_spinner=False)
-def read_uploaded(file) -> pd.DataFrame:
-    """Upload loader: CSV/XLSX/GZ."""
-    name = file.name.lower()
-    if name.endswith(".csv"):
-        return pd.read_csv(file, sep=None, engine="python", on_bad_lines="skip", low_memory=False)
-    if name.endswith((".xlsx", ".xls")):
-        return pd.read_excel(file)
-    if name.endswith(".gz") or name.endswith(".csv.gz"):
-        return pd.read_csv(file, compression="gzip", sep=None, engine="python", on_bad_lines="skip", low_memory=False)
-    raise ValueError("Upload CSV / XLSX / GZ.")
-
-
 # ----------------------------
-# Prep
+# Prep / FE
 # ----------------------------
 def make_target(df: pd.DataFrame) -> pd.DataFrame:
     if "Penyaluran_flag" in df.columns:
@@ -142,24 +117,23 @@ def make_target(df: pd.DataFrame) -> pd.DataFrame:
     if "Penyaluran Kerja" not in df.columns:
         return df
     s = df["Penyaluran Kerja"].astype(str).fillna("")
-    df = df.copy()
-    df["Penyaluran_flag"] = s.map(lambda x: 1 if YES_PATTERN.search(x) else 0).astype(int)
-    df["Penyaluran_label"] = np.where(df["Penyaluran_flag"] == 1, "Tersalur kerja", "Belum tersalur")
-    return df
+    out = df.copy()
+    out["Penyaluran_flag"] = s.map(lambda x: 1 if YES_PATTERN.search(x) else 0).astype(int)
+    out["Penyaluran_label"] = np.where(out["Penyaluran_flag"] == 1, "Tersalur kerja", "Belum tersalur")
+    return out
 
 
 def safe_fe(df: pd.DataFrame) -> pd.DataFrame:
-    """Minimal FE that won't explode file size."""
-    df = df.copy()
-    if "Umur" in df.columns and "Umur_bin" not in df.columns:
-        umur = pd.to_numeric(df["Umur"], errors="coerce")
+    out = df.copy()
+    if "Umur" in out.columns and "Umur_bin" not in out.columns:
+        umur = pd.to_numeric(out["Umur"], errors="coerce")
         bins = [-np.inf, 18, 22, 26, 30, 35, 45, np.inf]
         labels = ["<=18", "19-22", "23-26", "27-30", "31-35", "36-45", "46+"]
-        df["Umur_bin"] = pd.cut(umur, bins=bins, labels=labels)
-    if "Tanggal Gabungan" in df.columns and "Month" not in df.columns:
-        d = pd.to_datetime(df["Tanggal Gabungan"], errors="coerce")
-        df["Month"] = d.dt.to_period("M").astype(str)
-    return df
+        out["Umur_bin"] = pd.cut(umur, bins=bins, labels=labels)
+    if "Tanggal Gabungan" in out.columns and "Month" not in out.columns:
+        d = pd.to_datetime(out["Tanggal Gabungan"], errors="coerce")
+        out["Month"] = d.dt.to_period("M").astype(str)
+    return out
 
 
 def split_num_cat(X: pd.DataFrame) -> Tuple[List[str], List[str]]:
@@ -184,7 +158,6 @@ def make_preprocess(num_cols: List[str], cat_cols: List[str]) -> ColumnTransform
 
 
 def drop_identifier_like(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop columns that often break models (id/email/name/raw dates)."""
     drop = []
     for c in df.columns:
         cl = c.lower()
@@ -198,7 +171,7 @@ def drop_identifier_like(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ----------------------------
-# Clustering
+# Models
 # ----------------------------
 @dataclass
 class ClusterOut:
@@ -218,25 +191,26 @@ def fit_cluster(df_in: pd.DataFrame, feature_cols: List[str], k_min: int, k_max:
     prep = make_preprocess(num_cols, cat_cols)
 
     rows = []
+    from sklearn.metrics import silhouette_score
+
     for k in range(k_min, k_max + 1):
         km = MiniBatchKMeans(n_clusters=k, random_state=seed, batch_size=2048, n_init="auto")
         pipe = Pipeline([("prep", prep), ("km", km)])
         pipe.fit(X)
         Xt = pipe.named_steps["prep"].transform(X)
         labels = pipe.named_steps["km"].labels_
-        from sklearn.metrics import silhouette_score
-
         sil = silhouette_score(Xt, labels)
         rows.append({"k": k, "silhouette": float(sil), "inertia": float(pipe.named_steps["km"].inertia_)})
-    k_df = pd.DataFrame(rows).sort_values("k")
 
+    k_df = pd.DataFrame(rows).sort_values("k")
     best_k = int(k_df.sort_values(["silhouette", "k"], ascending=[False, True]).iloc[0]["k"])
+
     km = MiniBatchKMeans(n_clusters=best_k, random_state=seed, batch_size=2048, n_init="auto")
     pipe = Pipeline([("prep", prep), ("km", km)])
     pipe.fit(X)
     labels = pipe.named_steps["km"].labels_
-
     Xt = pipe.named_steps["prep"].transform(X)
+
     svd = TruncatedSVD(n_components=2, random_state=seed)
     xy = svd.fit_transform(Xt)
     svd2d = pd.DataFrame({"SVD1": xy[:, 0], "SVD2": xy[:, 1], "cluster_id": labels})
@@ -246,9 +220,6 @@ def fit_cluster(df_in: pd.DataFrame, feature_cols: List[str], k_min: int, k_max:
     return ClusterOut(k_df=k_df.reset_index(drop=True), best_k=best_k, labeled=labeled, svd2d=svd2d)
 
 
-# ----------------------------
-# Supervised (ranking)
-# ----------------------------
 @dataclass
 class SupOut:
     summary: pd.DataFrame
@@ -268,12 +239,7 @@ def fit_supervised(df_in: pd.DataFrame, target: str, feature_cols: List[str], te
 
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=test_size, random_state=seed, stratify=y)
 
-    base = Pipeline(
-        [
-            ("prep", prep),
-            ("clf", LogisticRegression(max_iter=2000, class_weight="balanced", solver="liblinear")),
-        ]
-    )
+    base = Pipeline([("prep", prep), ("clf", LogisticRegression(max_iter=2000, class_weight="balanced", solver="liblinear"))])
     base.fit(Xtr, ytr)
 
     grid = {"clf__C": [0.01, 0.1, 1, 10, 100]}
@@ -300,12 +266,11 @@ def fit_supervised(df_in: pd.DataFrame, target: str, feature_cols: List[str], te
     scored = df_in.copy()
     scored["placement_score"] = pall
     scored = scored.sort_values("placement_score", ascending=False).reset_index(drop=True)
-
     return SupOut(summary=summary, scored=scored, model=best)
 
 
 # ----------------------------
-# Charts (Altair)
+# Charts
 # ----------------------------
 def chart_k(k_df: pd.DataFrame) -> alt.Chart:
     a = alt.Chart(k_df).mark_line(point=True).encode(
@@ -345,16 +310,18 @@ def chart_topk(scored: pd.DataFrame, target: str) -> alt.Chart:
     )
 
 
-# =========================================================
-# UI (Repo / Upload)
-# =========================================================
+# ----------------------------
+# UI
+# ----------------------------
+st.title("Persona Predict")
+st.caption("NO Drive/requests. Data from repo or upload only.")
+
+df_raw: Optional[pd.DataFrame] = None
+found_path: Optional[str] = None
+
 with st.sidebar:
     st.header("Data source")
-
     source = st.radio("Choose", ["Repo file", "Upload file (CSV/XLSX/GZ)"], index=0)
-
-    df_raw: Optional[pd.DataFrame] = None
-    found_path: Optional[str] = None
 
     if source == "Repo file":
         script_path, repo_root, rels = scan_repo_files()
@@ -362,15 +329,22 @@ with st.sidebar:
         st.code(f"__file__: {script_path}\nrepo_root: {repo_root}")
 
         if not rels:
-            st.error(
-                "Tidak ada file data (.csv/.csv.gz/.gz/.xlsx/.xls) terdeteksi di repo.\n\n"
-                "Solusi:\n"
-                "- Pakai **Upload file**, atau\n"
-                "- Pastikan file ada di repo (misal: raw_data/ atau data/)"
-            )
+            st.error("Tidak ada file data (.csv/.csv.gz/.gz/.xlsx) terdeteksi di repo.")
             st.stop()
 
-        chosen = st.selectbox("Pilih file data di repo:", rels, index=0)
+        # pilih default = file terbesar biar gak kepilih yang 2 bytes
+        sizes = []
+        for r in rels:
+            p = Path(repo_root) / r
+            try:
+                sizes.append((r, p.stat().st_size))
+            except Exception:
+                sizes.append((r, -1))
+        sizes_sorted = sorted(sizes, key=lambda x: x[1], reverse=True)
+        default_rel = sizes_sorted[0][0] if sizes_sorted else rels[0]
+        default_idx = rels.index(default_rel) if default_rel in rels else 0
+
+        chosen = st.selectbox("Pilih file data di repo:", rels, index=default_idx)
         full_path = Path(repo_root) / chosen
 
         st.caption("Debug file")
@@ -381,27 +355,41 @@ with st.sidebar:
             st.error(f"Gagal akses file: {e}")
             st.stop()
 
-        # show head for csv/gz only
         if full_path.name.lower().endswith((".csv", ".csv.gz", ".gz")):
             st.code(sniff_file_head(full_path, n_lines=10))
 
-        try:
-            df_raw = read_table(full_path)
-            found_path = str(full_path)
-            st.success(f"Loaded: {chosen}")
-        except Exception as e:
-            st.error(f"Gagal baca file: {chosen}\nError: {e}")
+        # guard: kalau file kecil banget, stop biar gak kebaca salah
+        if full_path.stat().st_size < 1024:
+            st.error(
+                "File terlalu kecil (kemungkinan placeholder/hasil GitHub error).\n"
+                "Pilih file lain yang ukurannya MB-an (lihat Size)."
+            )
             st.stop()
+
+        df_raw = read_table(full_path)
+        found_path = str(full_path)
 
     else:
         f = st.file_uploader("Upload CSV/XLSX/GZ", type=["csv", "xlsx", "xls", "gz"])
-        if f is not None:
-            try:
-                df_raw = read_uploaded(f)
-                found_path = "uploaded"
-            except Exception as e:
-                st.error(f"Gagal baca upload: {e}")
+        if f is None:
+            st.info("Upload dulu filenya.")
+            st.stop()
+
+        name = f.name.lower()
+        try:
+            if name.endswith(".csv"):
+                df_raw = pd.read_csv(f)
+            elif name.endswith((".xlsx", ".xls")):
+                df_raw = pd.read_excel(f)
+            elif name.endswith(".gz"):
+                df_raw = pd.read_csv(f, compression="gzip", sep=None, engine="python", on_bad_lines="skip")
+            else:
+                st.error("Upload CSV / XLSX / GZ.")
                 st.stop()
+            found_path = "uploaded"
+        except Exception as e:
+            st.error(f"Gagal baca upload: {e}")
+            st.stop()
 
     st.divider()
     st.header("Big data controls")
@@ -410,23 +398,11 @@ with st.sidebar:
 
     st.divider()
     st.header("Pipeline")
-    do_cluster = st.checkbox("Run clustering", value=True)
-    do_supervised = st.checkbox("Run supervised ranking", value=True)
-
-    st.divider()
-    st.header("Settings")
     seed = st.number_input("random_state", value=42, step=1)
     test_size = st.slider("test_size", 0.05, 0.5, 0.2)
 
-if df_raw is None:
-    st.info("Pilih Repo file / Upload dulu.")
-    st.stop()
-
+# ---- main page must show something
 st.caption(f"Loaded from: {found_path}")
-
-# =========================================================
-# Main pipeline
-# =========================================================
 df = safe_fe(df_raw.copy())
 df = make_target(df)
 
@@ -451,7 +427,6 @@ with c2:
 
 st.divider()
 
-# Default features (light)
 default_cols = [
     "Umur", "Umur_bin", "Region", "Batch_num", "Batch_has_plus",
     "Community_flag", "Event_flag", "Engagement_level",
@@ -466,48 +441,43 @@ feat_cols = [c for c in default_cols if c in avail]
 if not feat_cols:
     feat_cols = [c for c in df_work.columns if c not in ["Penyaluran_flag", "Penyaluran_label"]][:25]
 
-# Clustering
-if do_cluster:
+# Buttons to avoid auto-freeze
+colA, colB = st.columns(2)
+run_cluster = colA.button("Run clustering")
+run_supervised = colB.button("Run supervised ranking")
+
+if run_cluster:
     st.subheader("1) Persona clustering")
     a, b = st.columns(2)
-    with a:
-        kmin = st.number_input("k_min", value=2, min_value=2, step=1)
-    with b:
-        kmax = st.number_input("k_max", value=8, min_value=2, step=1)
+    kmin = a.number_input("k_min", value=2, min_value=2, step=1)
+    kmax = b.number_input("k_max", value=8, min_value=2, step=1)
 
-    try:
+    with st.spinner("Fitting clustering..."):
         cl = fit_cluster(df_work, feat_cols, int(kmin), int(kmax), int(seed))
-        st.write(f"Best k (silhouette): **{cl.best_k}**")
-        st.altair_chart(chart_k(cl.k_df), use_container_width=True)
-        st.altair_chart(chart_svd(cl.svd2d), use_container_width=True)
-        df_work = cl.labeled
-    except Exception as e:
-        st.error(f"Clustering failed: {e}")
+    st.write(f"Best k (silhouette): **{cl.best_k}**")
+    st.altair_chart(chart_k(cl.k_df), use_container_width=True)
+    st.altair_chart(chart_svd(cl.svd2d), use_container_width=True)
 
-st.divider()
-
-# Supervised ranking
-if do_supervised:
+if run_supervised:
     st.subheader("2) Supervised ranking (Logistic Regression)")
     if "Penyaluran_flag" not in df_work.columns:
         st.warning("Need 'Penyaluran Kerja' or 'Penyaluran_flag' to run supervised model.")
     else:
-        sup_cols = feat_cols + (["cluster_id"] if "cluster_id" in df_work.columns else [])
-        try:
+        sup_cols = feat_cols
+        with st.spinner("Training supervised model..."):
             sup = fit_supervised(df_work, "Penyaluran_flag", sup_cols, float(test_size), int(seed))
-            st.dataframe(sup.summary, use_container_width=True, hide_index=True)
-            st.altair_chart(chart_topk(sup.scored, "Penyaluran_flag"), use_container_width=True)
 
-            topn = st.slider("Top-N", 10, min(500, len(sup.scored)), 50)
-            st.dataframe(sup.scored.head(int(topn)), use_container_width=True)
+        st.dataframe(sup.summary, use_container_width=True, hide_index=True)
+        st.altair_chart(chart_topk(sup.scored, "Penyaluran_flag"), use_container_width=True)
 
-            st.download_button(
-                "Download Top-N (CSV)",
-                data=sup.scored.head(int(topn)).to_csv(index=False).encode("utf-8"),
-                file_name="persona_predict_topN.csv",
-                mime="text/csv",
-            )
-        except Exception as e:
-            st.error(f"Supervised modelling failed: {e}")
+        topn = st.slider("Top-N", 10, min(500, len(sup.scored)), 50)
+        st.dataframe(sup.scored.head(int(topn)), use_container_width=True)
 
-st.caption("For very large data: train offline, then deploy app to score + visualize only.")
+        st.download_button(
+            "Download Top-N (CSV)",
+            data=sup.scored.head(int(topn)).to_csv(index=False).encode("utf-8"),
+            file_name="persona_predict_topN.csv",
+            mime="text/csv",
+        )
+
+st.caption("Tip: kalau data gede, keep sample ON supaya Streamlit nggak nge-freeze.")
