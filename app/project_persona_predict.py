@@ -108,17 +108,26 @@ st.caption("Goal: semua visualisasi notebook muncul, tapi user bisa filter super
 # -----------------------------
 # Load
 # -----------------------------
+import pandas as pd
+import streamlit as st
+from pathlib import Path
+
+DEFAULT_PATH = "raw_data/raw_data.csv"
+
 with st.sidebar:
     st.header("Data")
-    data_path = st.text_input("Path CSV", "raw_data.csv")
-    st.divider()
+    data_path = st.text_input("Path CSV", value=DEFAULT_PATH)
 
-try:
-    df = load_data(data_path)
-except Exception as e:
-    st.error("Gagal load CSV. Pastikan file ada & format benar.")
-    st.exception(e)
+p = Path(data_path)
+
+if not p.exists():
+    st.error(
+        f"File tidak ditemukan: `{data_path}`.\n\n"
+        "Pastikan CSV ada di repo sesuai path itu. Contoh yang benar: `raw_data/raw_data.csv`"
+    )
     st.stop()
+
+df = pd.read_csv(p)
 
 # -----------------------------
 # Global config: detect columns
