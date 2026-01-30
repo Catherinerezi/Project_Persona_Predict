@@ -264,20 +264,29 @@ def fe_core(df_in: pd.DataFrame) -> pd.DataFrame:
     komunitas_col = resolve_col(df, ["Komunitas", "community", "ikut komunitas"])
     event_col = resolve_col(df, ["Event", "ikut event"])
 
+    def _to_flag_series(colname: str) -> pd.Series:
+        s = df[colname].astype(str).str.strip().str.lower()
+        return s.isin(["1", "ya", "yes", "true", "ikut", "hadir", "y"]).astype(int)
+
     if komunitas_col and "Community_flag" not in df.columns:
-        df["Community_flag"] = df[komunitas_col].astype(str).str.strip().str.lower().isin(
-            ["1", "ya", "yes", "true", "ikut", "hadir", "y"]
-        ).astype(int)
+        df["Community_flag"] = _to_flag_series(komunitas_col)
 
     if event_col and "Event_flag" not in df.columns:
-        df["Event_flag"] = df[event_col].astype(str).str.strip().str.lower().isin(
-            ["1", "ya", "yes", "true", "ikut", "hadir", "y"]
-        ).astype(int)
+        df["Event_flag"] = _to_flag_series(event_col)
 
+    # IMPORTANT: robust against NaN / empty / weird values
     if "Engagement_level" not in df.columns:
-        c = df["Community_flag"] if "Community_flag" in df.columns else 0
-        e = df["Event_flag"] if "Event_flag" in df.columns else 0
-        df["Engagement_level"] = (pd.Series(c).astype(int) + pd.Series(e).astype(int)).astype(int)
+        if "Community_flag" in df.columns:
+            c = pd.to_numeric(df["Community_flag"], errors="coerce").fillna(0).astype(int)
+        else:
+            c = pd.Series(np.zeros(len(df), dtype=int), index=df.index)
+
+        if "Event_flag" in df.columns:
+            e = pd.to_numeric(df["Event_flag"], errors="coerce").fillna(0).astype(int)
+        else:
+            e = pd.Series(np.zeros(len(df), dtype=int), index=df.index)
+
+        df["Engagement_level"] = (c + e).astype(int)
 
     # ---- Program_jobconnect_flag
     prog_col = resolve_col(df, ["Program", "program", "Program yang diikuti"])
