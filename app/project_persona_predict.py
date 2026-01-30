@@ -1,13 +1,13 @@
 # streamlit_app.py
 # Persona Predict — Streamlit (Altair)
-# Notes for large data:
-# - For exploration/training in-app, use sampling (sidebar).
-# - For production, precompute features & train offline, then load model artifacts.
+# NO LFS logic, NO requests, NO Google Drive / GSheets. Repo/Upload only.
 
 from __future__ import annotations
 
+import itertools
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import altair as alt
@@ -29,53 +29,108 @@ alt.data_transformers.disable_max_rows()
 
 YES_PATTERN = re.compile(r"\b(ya|y|yes|sudah|tersalur|placed|berhasil)\b", re.I)
 
-import io
-import requests
-
-def normalize_drive_url(url: str) -> str:
-    m = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
-    if m:
-        file_id = m.group(1)
-        return f"https://drive.google.com/uc?export=download&id={file_id}"
-    return url
-
-@st.cache_data(show_spinner=False)
-def read_csv_from_url(url: str) -> pd.DataFrame:
-    url = normalize_drive_url(url)
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
-    return pd.read_csv(io.BytesIO(r.content))
+# =========================================================
+# Data loading (Repo / Upload) — NO Drive/requests
+# =========================================================
+def _repo_root_from_file() -> Path:
+    """
+    Streamlit Cloud biasanya:
+      /mount/src/<repo>/<subfolder>/<script>.py
+    Kalau script kamu ada di /app/, repo_root = parents[1].
+    """
+    script_path = Path(__file__).resolve()
+    return script_path.parents[1]
 
 
-# ----------------------------
-# Data loading
-# ----------------------------
+def _is_probably_table(p: Path) -> bool:
+    return p.name.lower().endswith((".csv", ".csv.gz", ".gz", ".xlsx", ".xls"))
+
+
+def sniff_file_head(path: Path, n_lines: int = 10) -> str:
+    """Baca sedikit aja biar aman buat file gede."""
+    try:
+        name = path.name.lower()
+        if name.endswith(".csv.gz") or name.endswith(".gz"):
+            import gzip
+
+            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
+                return "".join(itertools.islice(f, n_lines))
+        if name.endswith(".csv"):
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                return "".join(itertools.islice(f, n_lines))
+        return "[head skipped: not a text csv/gz]"
+    except Exception as e:
+        return f"[Gagal baca head: {e}]"
+
+
+def read_table(path: Path) -> pd.DataFrame:
+    """Loader robust: auto delimiter, handle gzip, skip bad lines."""
+    name = path.name.lower()
+
+    if name.endswith((".xlsx", ".xls")):
+        return pd.read_excel(path)
+
+    if name.endswith(".csv"):
+        return pd.read_csv(
+            path,
+            sep=None,
+            engine="python",
+            encoding_errors="replace",
+            on_bad_lines="skip",
+            low_memory=False,
+        )
+
+    if name.endswith(".csv.gz") or name.endswith(".gz"):
+        return pd.read_csv(
+            path,
+            compression="gzip",
+            sep=None,
+            engine="python",
+            encoding_errors="replace",
+            on_bad_lines="skip",
+            low_memory=False,
+        )
+
+    raise ValueError(f"Format tidak didukung: {path.name}")
+
+
+@st.cache_data(show_spinner=True)
+def scan_repo_files() -> tuple[str, str, list[str]]:
+    """
+    Return:
+      - script_path
+      - repo_root
+      - rel paths for candidate data files
+    """
+    script_path = Path(__file__).resolve()
+    repo_root = _repo_root_from_file()
+
+    rels: list[str] = []
+    for p in repo_root.rglob("*"):
+        if p.is_file() and _is_probably_table(p):
+            rel = str(p.relative_to(repo_root))
+            # skip noise
+            if any(part.startswith(".") for part in p.parts):
+                continue
+            if "venv" in rel or "__pycache__" in rel:
+                continue
+            rels.append(rel)
+
+    rels = sorted(set(rels))
+    return str(script_path), str(repo_root), rels
+
+
 @st.cache_data(show_spinner=False)
 def read_uploaded(file) -> pd.DataFrame:
+    """Upload loader: CSV/XLSX/GZ."""
     name = file.name.lower()
     if name.endswith(".csv"):
-        return pd.read_csv(file)
+        return pd.read_csv(file, sep=None, engine="python", on_bad_lines="skip", low_memory=False)
     if name.endswith((".xlsx", ".xls")):
         return pd.read_excel(file)
-    raise ValueError("Upload CSV / XLSX.")
-
-
-def has_gsheets() -> bool:
-    return "gcp_service_account" in st.secrets
-
-
-def read_gsheet(sheet_id: str, worksheet: str) -> pd.DataFrame:
-    import gspread
-    from google.oauth2.service_account import Credentials
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets.readonly",
-        "https://www.googleapis.com/auth/drive.readonly",
-    ]
-    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
-    gc = gspread.authorize(creds)
-    ws = gc.open_by_key(sheet_id).worksheet(worksheet)
-    return pd.DataFrame(ws.get_all_records())
+    if name.endswith(".gz") or name.endswith(".csv.gz"):
+        return pd.read_csv(file, compression="gzip", sep=None, engine="python", on_bad_lines="skip", low_memory=False)
+    raise ValueError("Upload CSV / XLSX / GZ.")
 
 
 # ----------------------------
@@ -170,6 +225,7 @@ def fit_cluster(df_in: pd.DataFrame, feature_cols: List[str], k_min: int, k_max:
         Xt = pipe.named_steps["prep"].transform(X)
         labels = pipe.named_steps["km"].labels_
         from sklearn.metrics import silhouette_score
+
         sil = silhouette_score(Xt, labels)
         rows.append({"k": k, "silhouette": float(sil), "inertia": float(pipe.named_steps["km"].inertia_)})
     k_df = pd.DataFrame(rows).sort_values("k")
@@ -212,10 +268,12 @@ def fit_supervised(df_in: pd.DataFrame, target: str, feature_cols: List[str], te
 
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=test_size, random_state=seed, stratify=y)
 
-    base = Pipeline([
-        ("prep", prep),
-        ("clf", LogisticRegression(max_iter=2000, class_weight="balanced", solver="liblinear"))
-    ])
+    base = Pipeline(
+        [
+            ("prep", prep),
+            ("clf", LogisticRegression(max_iter=2000, class_weight="balanced", solver="liblinear")),
+        ]
+    )
     base.fit(Xtr, ytr)
 
     grid = {"clf__C": [0.01, 0.1, 1, 10, 100]}
@@ -287,42 +345,63 @@ def chart_topk(scored: pd.DataFrame, target: str) -> alt.Chart:
     )
 
 
-# ----------------------------
-# UI
-# ----------------------------
-st.title("Persona Predict — Streamlit (Altair)")
-
+# =========================================================
+# UI (Repo / Upload)
+# =========================================================
 with st.sidebar:
     st.header("Data source")
 
-    opts = ["Upload file (CSV/XLSX)", "URL (CSV)"] + (["Google Sheets"] if has_gsheets() else [])
-    source = st.radio("Choose", opts)
+    source = st.radio("Choose", ["Repo file", "Upload file (CSV/XLSX/GZ)"], index=0)
 
     df_raw: Optional[pd.DataFrame] = None
+    found_path: Optional[str] = None
 
-    if source == "Upload file (CSV/XLSX)":
-        f = st.file_uploader("Upload CSV/XLSX", type=["csv", "xlsx", "xls"])
+    if source == "Repo file":
+        script_path, repo_root, rels = scan_repo_files()
+        st.caption("Debug (repo detection)")
+        st.code(f"__file__: {script_path}\nrepo_root: {repo_root}")
+
+        if not rels:
+            st.error(
+                "Tidak ada file data (.csv/.csv.gz/.gz/.xlsx/.xls) terdeteksi di repo.\n\n"
+                "Solusi:\n"
+                "- Pakai **Upload file**, atau\n"
+                "- Pastikan file ada di repo (misal: raw_data/ atau data/)"
+            )
+            st.stop()
+
+        chosen = st.selectbox("Pilih file data di repo:", rels, index=0)
+        full_path = Path(repo_root) / chosen
+
+        st.caption("Debug file")
+        try:
+            st.write("Path:", chosen)
+            st.write("Size (bytes):", full_path.stat().st_size)
+        except Exception as e:
+            st.error(f"Gagal akses file: {e}")
+            st.stop()
+
+        # show head for csv/gz only
+        if full_path.name.lower().endswith((".csv", ".csv.gz", ".gz")):
+            st.code(sniff_file_head(full_path, n_lines=10))
+
+        try:
+            df_raw = read_table(full_path)
+            found_path = str(full_path)
+            st.success(f"Loaded: {chosen}")
+        except Exception as e:
+            st.error(f"Gagal baca file: {chosen}\nError: {e}")
+            st.stop()
+
+    else:
+        f = st.file_uploader("Upload CSV/XLSX/GZ", type=["csv", "xlsx", "xls", "gz"])
         if f is not None:
-            df_raw = read_uploaded(f)
-
-    elif source == "URL (CSV)":
-        url = st.text_input("CSV direct URL (Drive/Dropbox/S3)")
-        st.caption("Tip (Drive): use https://drive.google.com/uc?export=download&id=FILE_ID")
-        if url:
             try:
-                df_raw = read_csv_from_url(url)
+                df_raw = read_uploaded(f)
+                found_path = "uploaded"
             except Exception as e:
-                st.error(f"Failed to load CSV from URL: {e}")
-
-    else:  # Google Sheets
-        st.caption("Set `gcp_service_account` in Streamlit secrets.")
-        sheet_id = st.text_input("Sheet ID")
-        worksheet = st.text_input("Worksheet", value="Sheet1")
-        if sheet_id and worksheet:
-            try:
-                df_raw = read_gsheet(sheet_id, worksheet)
-            except Exception as e:
-                st.error(f"Failed to read Google Sheet: {e}")
+                st.error(f"Gagal baca upload: {e}")
+                st.stop()
 
     st.divider()
     st.header("Big data controls")
@@ -340,9 +419,14 @@ with st.sidebar:
     test_size = st.slider("test_size", 0.05, 0.5, 0.2)
 
 if df_raw is None:
-    st.info("Upload dataset, paste URL CSV, or connect Google Sheets.")
+    st.info("Pilih Repo file / Upload dulu.")
     st.stop()
 
+st.caption(f"Loaded from: {found_path}")
+
+# =========================================================
+# Main pipeline
+# =========================================================
 df = safe_fe(df_raw.copy())
 df = make_target(df)
 
@@ -390,6 +474,7 @@ if do_cluster:
         kmin = st.number_input("k_min", value=2, min_value=2, step=1)
     with b:
         kmax = st.number_input("k_max", value=8, min_value=2, step=1)
+
     try:
         cl = fit_cluster(df_work, feat_cols, int(kmin), int(kmax), int(seed))
         st.write(f"Best k (silhouette): **{cl.best_k}**")
