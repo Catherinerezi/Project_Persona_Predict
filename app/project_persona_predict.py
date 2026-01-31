@@ -1,732 +1,621 @@
-# app.py
-# Persona Segmentation & Placement Prediction — Single-file Streamlit app (PDF-aligned, no Plotly/Altair)
-
+import re
 import streamlit as st
 import pandas as pd
 import numpy as np
+import altair as alt
 
 from sklearn.model_selection import train_test_split
-from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
+from sklearn.cluster import KMeans
 from sklearn.decomposition import TruncatedSVD
-from sklearn.cluster import MiniBatchKMeans
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score, average_precision_score
 
-import matplotlib.pyplot as plt
+# ----------------------------
+# Config
+# ----------------------------
+st.set_page_config(page_title="Persona Segmentation & Placement Prediction", layout="wide")
+alt.data_transformers.disable_max_rows()
 
-
-# -------------------------
-# Page config
-# -------------------------
-st.set_page_config(
-    page_title="Persona Segmentation & Placement Prediction (PDF-aligned)",
-    layout="wide"
-)
-
-
-# -------------------------
+# ----------------------------
 # Helpers
-# -------------------------
-def _norm_col(c: str) -> str:
-    c = str(c).strip()
-    c = c.replace("\n", " ").replace("\t", " ")
-    c = " ".join(c.split())
-    return c
+# ----------------------------
+def _norm_str(x) -> str:
+    if pd.isna(x):
+        return ""
+    return str(x).strip()
 
+def _norm_lower(x) -> str:
+    return _norm_str(x).lower()
 
-def make_target_from_penyaluran(v):
+def make_flag_yes(x) -> int:
+    s = _norm_lower(x)
+    if s == "":
+        return 0
+    yes = ["ya", "y", "yes", "iya", "ikut", "pernah", "sudah", "hadir", "join", "gabung", "aktif", "sering"]
+    no = ["tidak", "nggak", "gak", "ga", "belum", "never", "no", "tdk"]
+    # token-level check
+    toks = set(re.split(r"\s+", s))
+    if toks & set(yes) and not (toks & set(no)):
+        return 1
+    if "pernah" in s and all(k not in s for k in ["tidak", "nggak", "gak", "ga", "belum"]):
+        return 1
+    return 0
+
+def map_domain_product(product: str) -> str:
+    s = _norm_lower(product)
+    if any(k in s for k in ["data", "analytics", "analyst", "science", "machine learning", "ml", "ai"]):
+        return "Data"
+    if any(k in s for k in ["backend", "front", "fullstack", "web", "golang", "python", "software", "dev", "engineer"]):
+        return "Tech"
+    if any(k in s for k in ["business", "product", "pm", "management", "hr", "finance", "audit", "investment", "accounting"]):
+        return "Business"
+    if any(k in s for k in ["ui", "ux", "design", "dkv", "graphic", "visual"]):
+        return "Design"
+    if any(k in s for k in ["marketing", "digital marketing", "seo", "ads", "branding", "pr", "public relation"]):
+        return "Marketing"
+    return "Other"
+
+def map_domain_pendidikan(jurusan: str, background: str = "") -> str:
+    s = f"{_norm_lower(jurusan)} {_norm_lower(background)}"
+    if any(k in s for k in ["informatika", "komputer", "sistem informasi", "teknik informatika", "it", "software", "computer"]):
+        return "Tech"
+    if any(k in s for k in ["statistika", "matematika", "data", "fisika", "kimia", "biologi", "science", "sains"]):
+        return "Data"
+    if any(k in s for k in ["manajemen", "akuntansi", "ekonomi", "bisnis", "marketing", "keuangan", "finance", "accounting"]):
+        return "Business"
+    if any(k in s for k in ["desain", "dkv", "arsitektur", "seni", "visual", "interior"]):
+        return "Design"
+    if any(k in s for k in ["komunikasi", "hukum", "psikologi", "sosiologi", "hubungan internasional", "administrasi publik", "politik"]):
+        return "Social"
+    return "Other"
+
+def map_motivasi_cluster(motivasi: str) -> str:
+    s = _norm_lower(motivasi)
+    if s == "":
+        return "Lainnya"
+    if any(k in s for k in ["freelance", "freelancer"]):
+        return "Freelance"
+    if any(k in s for k in ["switch", "pindah", "ganti karir", "career switch", "alih karir"]):
+        return "Switch career"
+    if any(k in s for k in ["kerja", "job", "karir", "penyaluran", "tersalur", "placement"]):
+        return "Dapat kerja"
+    if any(k in s for k in ["belajar", "skill", "upskill", "reskill", "upgrade", "ilmu", "kompetensi"]):
+        return "Belajar skill"
+    return "Lainnya"
+
+def make_target_penyaluran(x) -> int:
     """
-    Binarize target dari kolom 'Penyaluran Kerja' (raw data).
-    - 1: Tertarik
-    - 0: Tidak tertarik / belum / masih / dipertimbangkan
-    - NaN: unknown / '-' / kosong
+    Target robust (biar nggak "100% semua" karena salah parsing):
+    - kalau jawabannya "Ya/Sudah/Tersalur/Placed" => 1
+    - kalau jawabannya "Tertarik" => 1
+    - kalau "Tidak/Belum/Gak" => 0
     """
-    if pd.isna(v):
-        return np.nan
-    s = str(v).strip().lower()
-    if s in ["", "-", "nan", "none"]:
-        return np.nan
+    s = _norm_lower(x)
+    if s == "" or s in ["-", "nan"]:
+        return 0
 
     # negatives
-    if "tidak" in s:
+    if any(s.startswith(p) for p in ["tidak", "nggak", "gak", "ga", "belum"]):
         return 0
-    if "belum" in s or "masih" in s or "dipertimbangkan" in s or "perlu" in s:
+    if "tidak" in s and ("tertarik" in s or "tetarik" in s):
         return 0
 
-    # positives
-    if "tertarik" in s:
+    # positives: placement-like
+    if any(k in s for k in ["ya", "sudah", "tersalur", "placed", "berhasil", "udah", "sukses"]):
         return 1
 
-    # fallback unknown
-    return np.nan
+    # positives: interest-like
+    if "tertarik" in s or "tetarik" in s or re.search(r"\btrt?arik\b", s):
+        return 1
 
+    return 0
 
-def safe_value_counts(series: pd.Series):
-    vc = series.value_counts(dropna=False)
-    out = vc.rename_axis("value").reset_index(name="count")
-    out["value"] = out["value"].astype(str)
+def bucket_umur(u):
+    try:
+        u = float(u)
+    except Exception:
+        return "Unknown"
+    if u < 20: return "<20"
+    if u < 25: return "20-24"
+    if u < 30: return "25-29"
+    if u < 35: return "30-34"
+    return "35+"
+
+def make_engagement_level(row: pd.Series) -> str:
+    score = 0
+    score += make_flag_yes(row.get("Blog dibimbing", ""))
+    score += make_flag_yes(row.get("Community", ""))
+    score += make_flag_yes(row.get("Pernah ikut acara dibimbing/tidak", ""))
+    prod = _norm_lower(row.get("Product", ""))
+    if "job" in prod and "connect" in prod:
+        score += 1
+
+    if score >= 3: return "High"
+    if score == 2: return "Medium"
+    if score == 1: return "Low"
+    return "None"
+
+def apply_global_filters(df: pd.DataFrame, filter_cols: list[str], key_prefix: str="flt"):
+    out = df.copy()
+    for col in filter_cols:
+        if col not in out.columns:
+            continue
+        vals = sorted([v for v in out[col].dropna().astype(str).unique().tolist()])
+        if not vals:
+            continue
+        chosen = st.sidebar.multiselect(col, vals, default=vals, key=f"{key_prefix}_{col}")
+        out = out[out[col].astype(str).isin(chosen)]
     return out
 
-
-def build_preprocess(cat_cols, num_cols):
-    cat_pipe = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("ohe", OneHotEncoder(handle_unknown="ignore", sparse_output=True)),
-        ]
+def target_rate_table(df: pd.DataFrame, group_col: str, target_col: str, min_n: int = 30):
+    g = (
+        df.groupby(group_col, dropna=False)[target_col]
+        .agg(total="count", positives="sum")
+        .reset_index()
     )
-    num_pipe = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="median")),
-            ("scaler", StandardScaler(with_mean=False)),
-        ]
-    )
+    g["rate_pct"] = np.where(g["total"] > 0, 100 * g["positives"] / g["total"], np.nan)
+    g = g[g["total"] >= min_n].copy()
+    g = g.sort_values(["rate_pct", "total"], ascending=[False, False])
+    return g
 
-    prep = ColumnTransformer(
+def bar_rate_chart(g: pd.DataFrame, group_col: str, title: str, top_n: int = 20):
+    if g.empty:
+        return None
+    gg = g.head(top_n).copy()
+    gg[group_col] = gg[group_col].astype(str)
+
+    base = alt.Chart(gg).mark_bar().encode(
+        y=alt.Y(f"{group_col}:N", sort="-x", title=None),
+        x=alt.X("rate_pct:Q", title="Target rate (%)"),
+        tooltip=[group_col, "total:Q", "positives:Q", alt.Tooltip("rate_pct:Q", format=".2f")],
+    ).properties(title=title, height=min(600, 25 * len(gg) + 60))
+
+    text = alt.Chart(gg).mark_text(align="left", dx=5).encode(
+        y=alt.Y(f"{group_col}:N", sort="-x"),
+        x=alt.X("rate_pct:Q"),
+        text=alt.Text("rate_pct:Q", format=".1f"),
+    )
+    return base + text
+
+def build_preprocessor(cat_cols, num_cols):
+    cat_pipe = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("onehot", OneHotEncoder(handle_unknown="ignore")),
+    ])
+    num_pipe = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler()),
+    ])
+    return ColumnTransformer(
         transformers=[
             ("cat", cat_pipe, cat_cols),
             ("num", num_pipe, num_cols),
         ],
         remainder="drop",
-        sparse_threshold=0.3,
+        verbose_feature_names_out=False,
     )
-    return prep
 
+def name_persona_from_profile(profile: pd.DataFrame) -> dict:
+    """
+    Deterministic naming (biar sesuai PDF & stabil):
+    - termuda / paling "fresh grad/intern" => Fresh Graduate Explorer
+    - paling switcher + engagement tinggi => High Engagement Career Switcher
+    - sisanya => Working Professional Upskiller
+    """
+    profile = profile.copy()
+    fresh_cluster = int(profile.sort_values(["share_internish", "mean_umur"], ascending=[False, True]).iloc[0]["cluster_id"])
+    switch_cluster = int(profile.sort_values(["share_switcher", "engagement_score"], ascending=[False, False]).iloc[0]["cluster_id"])
+    remaining = [c for c in profile["cluster_id"].tolist() if c not in {fresh_cluster, switch_cluster}]
+    work_cluster = int(remaining[0]) if remaining else switch_cluster
+    return {
+        fresh_cluster: "Fresh Graduate Explorer",
+        switch_cluster: "High Engagement Career Switcher",
+        work_cluster: "Working Professional Upskiller",
+    }
 
-def plot_barh(values, labels, title, xlabel, annotate_fmt="{:.1f}%"):
-    fig, ax = plt.subplots(figsize=(9, max(3.2, 0.35 * len(labels))))
-    y = np.arange(len(labels))
-    ax.barh(y, values)
-    ax.set_yticks(y)
-    ax.set_yticklabels(labels)
-    ax.invert_yaxis()
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-
-    # annotate
-    for i, v in enumerate(values):
-        ax.text(v + (max(values) * 0.01 if max(values) > 0 else 0.01), i, annotate_fmt.format(v),
-                va="center", fontsize=10)
-
-    fig.tight_layout()
-    return fig
-
-
-def plot_scatter_2d(x, y, labels, title):
-    fig, ax = plt.subplots(figsize=(9, 6))
-    unique = pd.unique(labels)
-    for u in unique:
-        mask = (labels == u)
-        ax.scatter(x[mask], y[mask], s=14, alpha=0.75, label=str(u))
-    ax.set_title(title)
-    ax.set_xlabel("SVD-1")
-    ax.set_ylabel("SVD-2")
-    ax.legend(loc="best", fontsize=9)
-    fig.tight_layout()
-    return fig
-
-
-def precision_recall_at_k(y_true, y_score, ks):
-    # sort by score desc
+def precision_recall_at_k(y_true, y_score, k):
+    k = int(k)
+    if k <= 0:
+        return np.nan, np.nan
     order = np.argsort(-y_score)
-    y_sorted = np.asarray(y_true)[order]
-    total_pos = (y_sorted == 1).sum()
-    out = []
-    for k in ks:
-        k = int(k)
-        k = max(1, min(k, len(y_sorted)))
-        topk = y_sorted[:k]
-        tp = (topk == 1).sum()
-        prec = tp / k
-        rec = tp / total_pos if total_pos > 0 else np.nan
-        out.append((k, prec, rec))
-    return pd.DataFrame(out, columns=["k", "precision_at_k", "recall_at_k"])
+    topk = order[:k]
+    y_top = y_true.iloc[topk].values
+    tp = y_top.sum()
+    precision = tp / k
+    recall = tp / max(1, y_true.sum())
+    return precision, recall
 
+# ----------------------------
+# App
+# ----------------------------
+st.title("Persona Segmentation & Placement Prediction (PDF-aligned, single-file)")
 
-def group_lift_table(df_eval, group_col, k):
-    """
-    df_eval harus punya kolom:
-      - y_true (0/1)
-      - y_score (prob)
-      - group_col (kategori)
-    """
-    d = df_eval.copy()
-    d = d.dropna(subset=[group_col])
-
-    baseline = d["y_true"].mean()
-    if pd.isna(baseline) or baseline == 0:
-        baseline = np.nan
-
-    # global top-k threshold
-    k = int(max(1, min(k, len(d))))
-    thr = np.sort(d["y_score"].values)[-k]  # score cutoff (approx)
-    d["is_topk"] = d["y_score"] >= thr
-
-    g = d.groupby(group_col, dropna=False).agg(
-        baseline_total=("y_true", "size"),
-        baseline_pos=("y_true", "sum"),
-        baseline_rate=("y_true", "mean"),
-        topk_total=("is_topk", "sum"),
-        topk_pos=("y_true", lambda x: int(((d.loc[x.index, "is_topk"]) & (x == 1)).sum())),
-    ).reset_index()
-
-    g["topk_rate"] = np.where(g["topk_total"] > 0, g["topk_pos"] / g["topk_total"], np.nan)
-    g["lift"] = g["topk_rate"] / g["baseline_rate"].replace({0: np.nan})
-
-    # sort by lift desc, then baseline_total
-    g = g.sort_values(["lift", "baseline_total"], ascending=[False, False])
-    return g
-
-
-# -------------------------
-# Data loading
-# -------------------------
-@st.cache_data(show_spinner=False)
-def load_csv(file_or_path) -> pd.DataFrame:
-    if hasattr(file_or_path, "read"):
-        df = pd.read_csv(file_or_path)
-    else:
-        df = pd.read_csv(file_or_path)
-    df.columns = [_norm_col(c) for c in df.columns]
-    return df
-
-
-def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
-    d = df.copy()
-
-    # standardize key columns (keep original names, add snake-ish aliases)
-    # NOTE: match kolom di raw_data.csv yang kamu pakai
-    if "Motivasi Cluster" in d.columns:
-        d["Motivasi_cluster"] = d["Motivasi Cluster"]
-    if "Segmentasi Karir" in d.columns:
-        d["Segmen_karir"] = d["Segmentasi Karir"]
-    if "Domain" in d.columns:
-        d["Domain_pendidikan"] = d["Domain"]
-    if "Sumber" in d.columns:
-        d["Channel"] = d["Sumber"]
-
-    # month from "Tanggal Gabungan"
-    if "Tanggal Gabungan" in d.columns:
-        dt = pd.to_datetime(d["Tanggal Gabungan"], errors="coerce", dayfirst=True)
-        d["Month"] = dt.dt.to_period("M").astype(str)
-
-    # binary target for supervised
-    if "Penyaluran Kerja" in d.columns:
-        d["target"] = d["Penyaluran Kerja"].apply(make_target_from_penyaluran)
-
-    return d
-
-
-# -------------------------
-# Sidebar: data source
-# -------------------------
 st.sidebar.header("Data source")
-
-source_mode = st.sidebar.radio(
-    "Choose",
-    options=["Upload file (CSV)", "Repo/local path"],
-    index=0,
-    key="data_source_mode"
-)
-
-uploaded = None
-path_input = None
-
-if source_mode == "Upload file (CSV)":
-    uploaded = st.sidebar.file_uploader("Upload CSV", type=["csv"], key="uploader_csv")
-else:
-    path_input = st.sidebar.text_input(
-        "Path",
-        value="raw_data/raw_data.csv",
-        help="Contoh (deploy Streamlit Cloud): raw_data/raw_data.csv",
-        key="path_input"
-    )
+uploaded = st.sidebar.file_uploader("Upload CSV", type=["csv"], key="uploader_csv")
+path_text = st.sidebar.text_input("Atau isi path lokal (opsional)", value="", key="path_input")
 
 df_raw = None
-load_err = None
-try:
-    if uploaded is not None:
-        df_raw = load_csv(uploaded)
-    elif path_input:
-        df_raw = load_csv(path_input)
-except Exception as e:
-    load_err = str(e)
+if uploaded is not None:
+    df_raw = pd.read_csv(uploaded)
+elif path_text.strip():
+    try:
+        df_raw = pd.read_csv(path_text.strip())
+    except Exception as e:
+        st.sidebar.error(f"Can't read path: {e}")
 
 if df_raw is None:
-    st.title("Persona Segmentation & Placement Prediction (PDF-aligned)")
-    if load_err:
-        st.error(f"Can't read data: {load_err}")
-    st.info("Upload CSV dulu (sidebar) atau isi path repo yang benar.")
+    st.info("Upload CSV dulu untuk mulai.")
     st.stop()
 
-df = add_derived_columns(df_raw)
+df0 = df_raw.copy()
+df0.columns = [c.strip() for c in df0.columns]
 
-# -------------------------
-# Sidebar: Global filters
-# -------------------------
-st.sidebar.header("Global filters")
+# Feature engineering (PDF-aligned style)
+df0["Motivasi"] = df0.get("Motivasi mengikuti bootcamp", df0.get("Motivasi", "")).astype(str)
+df0["Motivasi_cluster"] = df0["Motivasi"].apply(map_motivasi_cluster)
 
-filter_candidates = [
-    c for c in [
-        "Product", "Kategori", "Month", "Channel",
-        "Segmen_karir", "Motivasi_cluster", "Domain_pendidikan",
-        "Region", "Domisili", "Provinsi", "Negara",
-        "Program", "Level pendidikan", "Kategori Kesibukan",
-        "Level Pekerjaan", "Kategori Pekerjaan",
-        "Status switcher", "Engagement", "Community flag", "Event flag",
-    ] if c in df.columns
+df0["Domain_pendidikan"] = [
+    map_domain_pendidikan(j, b)
+    for j, b in zip(df0.get("Jurusan pendidikan", ""), df0.get("Background pendidikan", ""))
 ]
+df0["Domain_product"] = df0.get("Product", "").apply(map_domain_product)
+df0["is_switcher"] = (df0["Domain_pendidikan"] != df0["Domain_product"]).astype(int)
 
-selected_filter_cols = st.sidebar.multiselect(
+df0["Engagement_level"] = df0.apply(make_engagement_level, axis=1)
+
+df0["Umur_num"] = pd.to_numeric(df0.get("Umur", np.nan), errors="coerce")
+df0["Umur_bin"] = df0["Umur_num"].apply(bucket_umur)
+
+def segmen_karir_baseline(row):
+    if int(row.get("is_switcher", 0)) == 1:
+        return "Switch career"
+    kp = _norm_lower(row.get("Kategori Pekerjaan", ""))
+    lp = _norm_lower(row.get("Level Pekerjaan", ""))
+    kk = _norm_lower(row.get("Kategori Kesibukan", ""))
+    if re.search(r"(intern|magang|fresh)", kp) or "fresh" in lp or "mahasiswa" in kk:
+        return "Fresh Graduate Explorer"
+    return "Working Professional Upskiller"
+
+df0["Segmen_karir"] = df0.apply(segmen_karir_baseline, axis=1)
+
+# Target
+df0["target"] = df0.get("Penyaluran Kerja", "").apply(make_target_penyaluran).astype(int)
+
+# ----------------------------
+# Filters
+# ----------------------------
+st.sidebar.header("Global filters")
+filterable_cols = ["Product", "Kategori", "Channel", "Month", "Segmen_karir", "Motivasi_cluster", "Engagement_level", "Umur_bin"]
+existing_filter_cols = [c for c in filterable_cols if c in df0.columns]
+
+chosen_filter_cols = st.sidebar.multiselect(
     "Pilih kolom untuk filter",
-    options=filter_candidates,
-    default=[c for c in ["Product", "Kategori", "Month", "Segmen_karir"] if c in filter_candidates],
-    key="filter_cols_multi"
+    existing_filter_cols,
+    default=[c for c in ["Product", "Kategori"] if c in existing_filter_cols],
+    key="filter_cols_pick",
 )
 
-df_f = df.copy()
-for col in selected_filter_cols:
-    # build options
-    opts = pd.Series(df_f[col].dropna().unique()).astype(str).sort_values().tolist()
-    if len(opts) == 0:
-        continue
-    chosen = st.sidebar.multiselect(
-        f"{col}",
-        options=opts,
-        default=[],
-        key=f"filter_{col}"  # IMPORTANT: unique key
+df = apply_global_filters(df0, chosen_filter_cols, key_prefix="gflt")
+
+tabs = st.tabs(["Overview", "EDA (Target-driven)", "Clustering (Persona)", "Supervised (Top-K Ranking)"])
+
+# ----------------------------
+# Overview
+# ----------------------------
+with tabs[0]:
+    st.subheader("Ringkasan")
+    c1, c2, c3, c4 = st.columns(4)
+    n = len(df)
+    pos = int(df["target"].sum())
+    rate = (pos / n * 100) if n else 0
+    c1.metric("Rows (after filter)", f"{n:,}")
+    c2.metric("Target positives", f"{pos:,}")
+    c3.metric("Target rate", f"{rate:.2f}%")
+    c4.metric("Distinct products", f"{df['Product'].nunique() if 'Product' in df.columns else 0:,}")
+
+    st.caption(
+        "Catatan: group bisa 100% kalau sample group kecil / target dominan. "
+        "Di EDA kamu bisa atur minimum group size untuk ngefilter noise."
     )
-    if chosen:
-        df_f = df_f[df_f[col].astype(str).isin(chosen)]
+    st.dataframe(df.head(30), use_container_width=True)
 
-# -------------------------
-# Header + KPI
-# -------------------------
-st.title("Persona Segmentation & Placement Prediction (PDF-aligned)")
+# ----------------------------
+# EDA
+# ----------------------------
+with tabs[1]:
+    st.subheader("EDA yang selaras dengan tujuan: pola peserta → segmentasi → prediksi penyaluran")
 
-left, right = st.columns([1.2, 1])
-with left:
-    st.markdown(
-        """
-**Tujuan proyek (selaras dengan PDF/vertopal):**
-- Memahami pola peserta Dibimbing  
-- Membangun segmentasi peserta yang akurat (persona)  
-- Mengembangkan model prediktif peluang penyaluran kerja untuk keputusan bisnis (akuisisi, desain program, intervensi)
-"""
-    )
+    dist = df["target"].value_counts().rename_axis("target").reset_index(name="count")
+    dist["label"] = dist["target"].map({0: "0 (Tidak)", 1: "1 (Tertarik/Tersalur)"})
+    ch = alt.Chart(dist).mark_bar().encode(
+        x=alt.X("label:N", title=None),
+        y=alt.Y("count:Q", title="Count"),
+        tooltip=["label:N", "count:Q"],
+    ).properties(title="Distribusi target", height=250)
+    st.altair_chart(ch, use_container_width=True)
 
-with right:
-    n_rows = len(df_f)
-    n_cols = df_f.shape[1]
-    pos_rate = df_f["target"].mean() if "target" in df_f.columns else np.nan
-    a, b, c = st.columns(3)
-    a.metric("Rows", f"{n_rows:,}")
-    b.metric("Columns", f"{n_cols:,}")
-    c.metric("Target mean", "-" if pd.isna(pos_rate) else f"{pos_rate*100:.1f}%")
+    st.markdown("### Target rate by breakdown")
+    breakdown_candidates = [c for c in [
+        "Product", "Kategori", "Channel", "Motivasi_cluster", "Segmen_karir",
+        "Engagement_level", "Umur_bin", "Domain_product", "Domain_pendidikan", "is_switcher"
+    ] if c in df.columns]
 
-st.divider()
+    breakdown_col = st.selectbox("Pilih breakdown", breakdown_candidates, index=0, key="eda_breakdown")
+    min_n = st.slider("Minimum ukuran group (filter noise)", 1, 300, 30, key="eda_min_n")
+    top_n = st.slider("Show top-N groups", 5, 60, 20, key="eda_top_n")
 
-# -------------------------
-# Tabs
-# -------------------------
-tab_overview, tab_eda, tab_cluster, tab_supervised = st.tabs(
-    ["Overview", "EDA (Target-driven)", "Clustering (Persona)", "Supervised (Top-K Ranking)"]
-)
+    g = target_rate_table(df, breakdown_col, "target", min_n=min_n)
+    chart = bar_rate_chart(g, breakdown_col, f"Target rate by {breakdown_col} (min_n={min_n})", top_n=top_n)
 
-# -------------------------
-# OVERVIEW
-# -------------------------
-with tab_overview:
-    st.subheader("Quick dataset check")
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        st.write("Contoh 10 baris (setelah filter):")
-        st.dataframe(df_f.head(10), use_container_width=True)
-    with c2:
-        if "target" in df_f.columns:
-            st.write("Distribusi target (dari 'Penyaluran Kerja'):")
-            st.dataframe(safe_value_counts(df_f["target"]), use_container_width=True)
-        else:
-            st.warning("Kolom target belum terbuat (butuh kolom 'Penyaluran Kerja').")
+    if chart is None:
+        st.warning("Tidak ada group yang memenuhi minimum ukuran group. Turunkan min_n atau ganti breakdown.")
+    else:
+        st.altair_chart(chart, use_container_width=True)
+        st.dataframe(g.head(top_n), use_container_width=True)
 
-    st.info(
-        "Catatan penting: untuk supervised, data yang target-nya NaN akan di-drop (khusus supervised). "
-        "EDA & clustering tetap bisa jalan di seluruh data."
-    )
-
-# -------------------------
-# EDA (TARGET-DRIVEN)
-# -------------------------
-with tab_eda:
-    st.subheader("Target rate dashboard (bisa pilih breakdown apa saja)")
-
-    if "target" not in df_f.columns:
-        st.error("Tidak ada kolom target. Pastikan CSV punya kolom 'Penyaluran Kerja'.")
-        st.stop()
-
-    # breakdown candidates for target-rate
-    breakdown_cols = [c for c in [
-        "Product", "Kategori", "Channel", "Month",
-        "Segmen_karir", "Motivasi_cluster", "Domain_pendidikan",
-        "Region", "Domisili", "Provinsi", "Negara",
-        "Program", "Level pendidikan", "Kategori Kesibukan",
-        "Level Pekerjaan", "Kategori Pekerjaan",
-        "Status switcher",
-    ] if c in df_f.columns]
-
-    colA, colB, colC = st.columns([1.2, 0.8, 0.8])
-    with colA:
-        breakdown = st.selectbox("Pilih breakdown", options=breakdown_cols, index=0, key="eda_breakdown")
-    with colB:
-        show_top_n = st.slider("Show top-N groups", 5, 60, 30, key="eda_topn")
-    with colC:
-        min_count = st.slider("Min count per group", 1, 200, 20, key="eda_mincount")
-
-    d_eda = df_f.dropna(subset=["target"]).copy()
-    if d_eda.empty:
-        st.warning("Semua target NaN setelah filter. Longgarkan filter atau cek mapping target.")
-        st.stop()
-
-    g = d_eda.groupby(breakdown, dropna=False).agg(
-        total=("target", "size"),
-        positives=("target", "sum"),
-    ).reset_index()
-
-    g["target_rate_pct"] = np.where(g["total"] > 0, 100 * g["positives"] / g["total"], np.nan)
-    g = g[g["total"] >= min_count].copy()
-    g = g.sort_values("target_rate_pct", ascending=False).head(int(show_top_n))
-
-    if g.empty:
-        st.warning("Tidak ada group yang memenuhi min_count setelah filter.")
-        st.stop()
-
-    fig = plot_barh(
-        values=g["target_rate_pct"].values,
-        labels=g[breakdown].astype(str).values,
-        title=f"Target rate by {breakdown}",
-        xlabel="Target rate (%)",
-        annotate_fmt="{:.1f}%"
-    )
-    st.pyplot(fig, use_container_width=True)
-
-    st.write("Tabel ringkas:")
-    st.dataframe(g.rename(columns={breakdown: "group"}), use_container_width=True)
-
-    st.subheader("Distribusi target")
-    vc = d_eda["target"].value_counts().sort_index()
-    fig2, ax2 = plt.subplots(figsize=(7, 4))
-    ax2.bar(vc.index.astype(str), vc.values)
-    ax2.set_title("Distribusi target (0/1)")
-    ax2.set_xlabel("Target")
-    ax2.set_ylabel("Count")
-    fig2.tight_layout()
-    st.pyplot(fig2, use_container_width=True)
-
-# -------------------------
-# CLUSTERING (PERSONA)
-# -------------------------
-with tab_cluster:
+# ----------------------------
+# Clustering
+# ----------------------------
+with tabs[2]:
     st.subheader("Persona clustering (3 cluster, PDF-aligned)")
 
-    # columns based on the PDF notebook
-    cat_cols = [c for c in [
-        "Region", "Batch", "Sumber", "Domain", "Program", "Product", "Kategori", "Channel",
+    cat_cols_pref = [
+        "Batch", "Product", "Kategori", "Channel",
         "Level pendidikan", "Kategori Kesibukan", "Level Pekerjaan", "Kategori Pekerjaan",
-        "Domisili", "Provinsi", "Negara", "Segmentasi Karir", "Motivasi Cluster", "Status switcher",
-        "Community flag", "Event flag",
-    ] if c in df_f.columns]
+        "Domain_pendidikan", "Domain_product", "Motivasi_cluster", "Engagement_level", "Umur_bin", "is_switcher"
+    ]
+    cat_cols = [c for c in cat_cols_pref if c in df0.columns]
+    num_cols = ["Umur_num"]
 
-    num_cols = [c for c in [
-        "Engagement", "Umur"
-    ] if c in df_f.columns]
-
-    if len(cat_cols) + len(num_cols) == 0:
-        st.error("Tidak menemukan kolom fitur untuk clustering. Cek nama kolom di CSV.")
-        st.stop()
-
-    st.write("Fitur yang dipakai (sesuai PDF):")
+    st.caption("Fitur yang dipakai (sesuai PDF, disesuaikan dengan kolom yang tersedia):")
     st.code(f"Categorical: {cat_cols}\nNumeric: {num_cols}")
 
-    run_cluster = st.button("Run clustering", type="primary", key="btn_run_cluster")
+    run = st.button("Run clustering", key="btn_cluster")
+    if run:
+        try:
+            X = df0[cat_cols + num_cols].copy()
 
-    if run_cluster:
-        with st.spinner("Running clustering..."):
-            X_df = df_f[cat_cols + num_cols].copy()
+            pre = build_preprocessor(cat_cols, num_cols)
+            kmeans = KMeans(n_clusters=3, n_init=20, random_state=42)  # fixed, no UI knob
+            pipe = Pipeline([("pre", pre), ("kmeans", kmeans)])
 
-            prep = build_preprocess(cat_cols, num_cols)
+            labels = pipe.fit_predict(X)
 
-            # PDF aligned: MiniBatchKMeans + TruncatedSVD 2D
-            # IMPORTANT: random_state dikunci (tidak ditaruh di UI) supaya konsisten seperti PDF.
-            k = 3
-            cluster_model = MiniBatchKMeans(
-                n_clusters=k,
-                random_state=42,
-                n_init=10,
-                batch_size=512
-            )
-
-            pipe = Pipeline(steps=[
-                ("prep", prep),
-                ("cluster", cluster_model)
-            ])
-
-            pipe.fit(X_df)
-            cluster_id = pipe.named_steps["cluster"].labels_
-
-            # persona mapping from PDF
-            persona_map = {
-                0: "High Engagement Career Switcher",
-                1: "Fresh Graduate Explorer",
-                2: "Working Professional Upskiller"
-            }
-
-            out = df_f.copy()
-            out["cluster_id"] = cluster_id
-            out["cluster_name"] = out["cluster_id"].map(persona_map).fillna(
-                "Cluster " + (out["cluster_id"] + 1).astype(str)
-            )
-
-            # 2D reduction (fit on transformed feature space)
-            X_trans = pipe.named_steps["prep"].transform(X_df)
+            Xt = pipe.named_steps["pre"].transform(X)
             svd = TruncatedSVD(n_components=2, random_state=42)
-            X_2d = svd.fit_transform(X_trans)
-            out["svd1"] = X_2d[:, 0]
-            out["svd2"] = X_2d[:, 1]
+            coords = svd.fit_transform(Xt)
 
-            # store in session_state for supervised tab
-            st.session_state["cluster_out"] = out
-            st.session_state["cluster_pipe"] = pipe
+            tmp = df0.copy()
+            tmp["cluster_id"] = labels
+            tmp["svd1"] = coords[:, 0]
+            tmp["svd2"] = coords[:, 1]
 
-        st.success("Clustering selesai. (3 persona sesuai PDF)")
+            tmp["_internish"] = (
+                tmp.get("Kategori Pekerjaan", "").astype(str).str.lower().str.contains("intern|magang|fresh", regex=True, na=False).astype(int)
+                if "Kategori Pekerjaan" in tmp.columns else 0
+            )
+            tmp["_eng_score"] = tmp["Engagement_level"].map({"None": 0, "Low": 1, "Medium": 2, "High": 3}).fillna(0).astype(float)
 
-    if "cluster_out" in st.session_state:
-        out = st.session_state["cluster_out"]
+            profile = tmp.groupby("cluster_id").agg(
+                mean_umur=("Umur_num", "mean"),
+                share_switcher=("is_switcher", "mean"),
+                share_internish=("_internish", "mean"),
+                engagement_score=("_eng_score", "mean"),
+                n=("cluster_id", "count"),
+            ).reset_index()
 
-        st.subheader("Cluster visualization (TruncatedSVD 2D) — Persona Named")
-        fig_sc = plot_scatter_2d(
-            x=out["svd1"].values,
-            y=out["svd2"].values,
-            labels=out["cluster_name"].astype(str).values,
-            title="Cluster Visualization (TruncatedSVD 2D) — Persona Named (PDF-aligned)"
-        )
-        st.pyplot(fig_sc, use_container_width=True)
+            mapping = name_persona_from_profile(profile)
+            tmp["Persona"] = tmp["cluster_id"].map(mapping).fillna(tmp["cluster_id"].astype(str))
 
-        st.subheader("Cluster profiling (ringkas)")
-        prof_cols = [c for c in ["cluster_name", "target", "Engagement", "Umur", "Segmen_karir", "Motivasi_cluster", "Product", "Kategori", "Channel"] if c in out.columns]
-        base = out[prof_cols].copy()
+            st.session_state["cluster_result"] = {
+                "df": tmp,
+                "pipe": pipe,
+                "persona_map": mapping,
+                "profile": profile,
+            }
+            st.success("Clustering selesai. Persona sudah dinamai (PDF-aligned).")
 
-        grp = base.groupby("cluster_name", dropna=False).agg(
-            total=("cluster_name", "size"),
-            target_rate=("target", "mean"),
-            avg_engagement=("Engagement", "mean") if "Engagement" in base.columns else ("cluster_name", "size"),
-            avg_umur=("Umur", "mean") if "Umur" in base.columns else ("cluster_name", "size"),
-        ).reset_index()
+        except Exception as e:
+            st.error(f"Gagal clustering: {e}")
+            st.stop()
 
-        grp["target_rate_pct"] = grp["target_rate"] * 100
-        st.dataframe(grp.sort_values("total", ascending=False), use_container_width=True)
+    if "cluster_result" in st.session_state and st.session_state["cluster_result"] is not None:
+        tmp = st.session_state["cluster_result"]["df"]
+        profile = st.session_state["cluster_result"]["profile"]
+        mapping = st.session_state["cluster_result"]["persona_map"]
 
-        st.caption("Catatan: Profiling detail bisa kamu tambah (mis. top kategori/program per persona) kalau dibutuhkan.")
+        st.markdown("### Cluster visualization (TruncatedSVD 2D) — Altair")
+        chart = alt.Chart(tmp).mark_circle(size=30, opacity=0.6).encode(
+            x=alt.X("svd1:Q", title="SVD-1"),
+            y=alt.Y("svd2:Q", title="SVD-2"),
+            color=alt.Color("Persona:N", legend=alt.Legend(title="Persona")),
+            tooltip=[
+                "Persona:N", "Product:N", "Kategori:N", "Motivasi_cluster:N", "Engagement_level:N",
+                alt.Tooltip("Umur_num:Q", format=".0f"),
+            ],
+        ).properties(height=520)
+        st.altair_chart(chart, use_container_width=True)
 
-    else:
-        st.info("Klik **Run clustering** dulu untuk menghasilkan persona & visualisasi.")
-
-# -------------------------
-# SUPERVISED (TOP-K)
-# -------------------------
-with tab_supervised:
-    st.subheader("Supervised ranking — Top-K (PDF-aligned)")
-
-    if "target" not in df_f.columns:
-        st.error("Tidak ada kolom target. Pastikan CSV punya kolom 'Penyaluran Kerja'.")
-        st.stop()
-
-    # use clustering result if available (optional)
-    if "cluster_out" in st.session_state:
-        df_sup_base = st.session_state["cluster_out"].copy()
-    else:
-        df_sup_base = df_f.copy()
-
-    # prepare supervised dataset (drop unknown target)
-    df_sup = df_sup_base.dropna(subset=["target"]).copy()
-    df_sup["target"] = df_sup["target"].astype(int)
-
-    # feature columns similar to PDF (plus optional cluster_id)
-    feat_candidates = [c for c in [
-        "Umur", "Region", "Batch", "Sumber", "Domain_pendidikan", "Program", "Product", "Kategori", "Channel",
-        "Motivasi_cluster", "Segmen_karir", "Status switcher", "Community flag", "Event flag", "Engagement",
-        "Month", "Level pendidikan", "Kategori Kesibukan", "Level Pekerjaan", "Kategori Pekerjaan",
-        "Domisili", "Provinsi", "Negara",
-        "cluster_id", "cluster_name"
-    ] if c in df_sup.columns]
-
-    if len(feat_candidates) == 0:
-        st.error("Tidak ada kolom fitur untuk supervised. Cek nama kolom di CSV.")
-        st.stop()
-
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col1:
-        k_capacity = st.slider("Business capacity K (berapa peserta bisa diintervensi)", 20, 800, 200, step=10, key="sup_k")
-    with col2:
-        test_size = st.slider("test_size (holdout)", 0.1, 0.4, 0.2, step=0.05, key="sup_test_size")
-    with col3:
-        use_cluster_id = st.checkbox("Use cluster_id as feature (jika ada)", value=True, key="sup_use_cluster")
-
-    if not use_cluster_id:
-        feat_candidates = [c for c in feat_candidates if c not in ["cluster_id", "cluster_name"]]
-
-    st.write("Fitur supervised dipakai:")
-    st.code(", ".join(feat_candidates))
-
-    # check class counts
-    vc = df_sup["target"].value_counts()
-    st.write("Target counts (0/1):", dict(vc.to_dict()))
-
-    # safety checks
-    if vc.min() < 10:
-        st.warning(
-            "Class minoritas terlalu kecil untuk split & evaluasi yang stabil. "
-            "Coba longgarkan filter atau pastikan mapping target benar."
+        st.markdown("### Profiling ringkas per persona")
+        profile2 = profile.copy()
+        profile2["Persona"] = profile2["cluster_id"].map(mapping)
+        st.dataframe(
+            profile2[["Persona", "n", "mean_umur", "share_switcher", "share_internish", "engagement_score"]]
+            .sort_values("n", ascending=False),
+            use_container_width=True,
         )
 
-    run_sup = st.button("Run supervised ranking", type="primary", key="btn_run_supervised")
+# ----------------------------
+# Supervised
+# ----------------------------
+with tabs[3]:
+    st.subheader("Supervised ranking (LogReg) — Top-K (PDF-aligned)")
 
+    df_sup = df0.copy()
+    if "cluster_result" in st.session_state and st.session_state["cluster_result"] is not None:
+        df_sup = st.session_state["cluster_result"]["df"].copy()
+
+    n = len(df_sup)
+    pos = int(df_sup["target"].sum())
+    neg = n - pos
+    st.write(f"Target counts: 1={pos:,} | 0={neg:,}")
+
+    if pos < 5 or neg < 5:
+        st.warning("Data target terlalu tidak seimbang / terlalu sedikit untuk supervised yang stabil. Cek definisi target atau pakai data lebih lengkap.")
+        st.stop()
+
+    feat_candidates = [
+        "Umur_num", "Umur_bin", "Domisili", "Provinsi", "Negara",
+        "Batch", "Product", "Kategori", "Channel",
+        "Level pendidikan", "Kategori Kesibukan", "Level Pekerjaan", "Kategori Pekerjaan",
+        "Motivasi_cluster", "Domain_pendidikan", "Domain_product", "is_switcher", "Engagement_level"
+    ]
+    if "Persona" in df_sup.columns:
+        feat_candidates.append("Persona")
+
+    feat_cols = [c for c in feat_candidates if c in df_sup.columns]
+
+    with st.expander("Feature columns (klik untuk lihat)"):
+        st.write(feat_cols)
+
+    test_size = st.slider("Holdout test_size", 0.1, 0.4, 0.2, 0.05, key="sup_test_size")
+    k_capacity = st.slider("Business capacity K (berapa peserta yang bisa diintervensi)", 50, min(2000, n), 200, 50, key="sup_k")
+
+    run_sup = st.button("Run supervised ranking", key="btn_sup")
     if run_sup:
-        with st.spinner("Training supervised model + evaluating Top-K..."):
-            X = df_sup[feat_candidates].copy()
-            y = df_sup["target"].values
+        try:
+            X = df_sup[feat_cols].copy()
+            y = df_sup["target"].astype(int)
 
-            # split stratified if possible
-            can_strat = (len(np.unique(y)) == 2) and (min(vc.values) >= 2)
-            if can_strat:
-                X_train, X_test, y_train, y_test = train_test_split(
-                    X, y,
-                    test_size=float(test_size),
-                    random_state=42,
-                    stratify=y
-                )
-            else:
-                X_train, X_test, y_train, y_test = X, X, y, y
+            num_cols = ["Umur_num"] if "Umur_num" in feat_cols else []
+            cat_cols = [c for c in feat_cols if c not in num_cols]
 
-            # split columns by type
-            cat_cols = [c for c in X.columns if X[c].dtype == "object" or X[c].dtype.name == "category"]
-            num_cols = [c for c in X.columns if c not in cat_cols]
+            pre = build_preprocessor(cat_cols, num_cols)
+            clf = LogisticRegression(max_iter=2000, class_weight="balanced")
+            model = Pipeline([("pre", pre), ("clf", clf)])
 
-            prep = build_preprocess(cat_cols, num_cols)
-
-            clf = LogisticRegression(
-                max_iter=2000,
-                class_weight="balanced",
-                n_jobs=None
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=float(test_size), random_state=42, stratify=y
             )
 
-            sup_pipe = Pipeline(steps=[
-                ("prep", prep),
-                ("clf", clf)
-            ])
+            model.fit(X_train, y_train)
+            p_test = model.predict_proba(X_test)[:, 1]
 
-            sup_pipe.fit(X_train, y_train)
+            auc = roc_auc_score(y_test, p_test)
+            ap = average_precision_score(y_test, p_test)
 
-            # scores on test
-            y_score = sup_pipe.predict_proba(X_test)[:, 1]
-
-            # Top-K metrics curve
-            ks = np.unique(np.clip(np.linspace(20, min(len(y_score), 800), 15).astype(int), 1, len(y_score)))
-            pr_df = precision_recall_at_k(y_test, y_score, ks)
-
-            # plot curves
-            fig_pr, ax_pr = plt.subplots(figsize=(8, 4))
-            ax_pr.plot(pr_df["k"], pr_df["precision_at_k"], marker="o")
-            ax_pr.set_title("Precision@K curve")
-            ax_pr.set_xlabel("K")
-            ax_pr.set_ylabel("Precision@K")
-            fig_pr.tight_layout()
-
-            fig_rc, ax_rc = plt.subplots(figsize=(8, 4))
-            ax_rc.plot(pr_df["k"], pr_df["recall_at_k"], marker="o")
-            ax_rc.set_title("Recall@K curve")
-            ax_rc.set_xlabel("K")
-            ax_rc.set_ylabel("Recall@K")
-            fig_rc.tight_layout()
-
-            st.session_state["sup_pipe"] = sup_pipe
-            st.session_state["sup_eval"] = {
+            st.session_state["sup_result"] = {
+                "model": model,
+                "feat_cols": feat_cols,
+                "X": X,
+                "y": y,
                 "X_test": X_test,
                 "y_test": y_test,
-                "y_score": y_score,
-                "pr_df": pr_df,
-                "k_capacity": int(k_capacity)
+                "p_test": p_test,
+                "auc": auc,
+                "ap": ap,
             }
-            st.session_state["sup_fig_pr"] = fig_pr
-            st.session_state["sup_fig_rc"] = fig_rc
+            st.success("Model trained.")
 
-        st.success("Supervised selesai. Scroll untuk dashboard evaluasi & Top-K output.")
+        except Exception as e:
+            st.error(f"Gagal supervised: {e}")
+            st.stop()
 
-    if "sup_eval" in st.session_state:
-        ev = st.session_state["sup_eval"]
-        k_capacity = int(ev["k_capacity"])
-        X_test = ev["X_test"]
-        y_test = ev["y_test"]
-        y_score = ev["y_score"]
-        pr_df = ev["pr_df"]
+    if "sup_result" in st.session_state:
+        res = st.session_state["sup_result"]
+        st.metric("ROC-AUC (holdout)", f"{res['auc']:.3f}")
+        st.metric("Average Precision (PR-AUC)", f"{res['ap']:.3f}")
 
-        st.subheader("Kenapa memilih Top-K segini?")
+        y_test = res["y_test"].reset_index(drop=True)
+        p_test = pd.Series(res["p_test"]).reset_index(drop=True)
+
+        max_k = min(len(y_test), 2000)
+        ks = np.unique(np.linspace(50, max_k, 25).astype(int))
+        rows = []
+        for k in ks:
+            prec, rec = precision_recall_at_k(y_test, p_test, k)
+            rows.append({"K": int(k), "precision_at_k": float(prec), "recall_at_k": float(rec)})
+        curve = pd.DataFrame(rows)
+
+        prec_chart = alt.Chart(curve).mark_line().encode(
+            x=alt.X("K:Q", title="K (Top-K)"),
+            y=alt.Y("precision_at_k:Q", title="Precision@K"),
+            tooltip=["K:Q", alt.Tooltip("precision_at_k:Q", format=".3f")],
+        ).properties(height=250, title="Precision@K curve (holdout)")
+
+        rec_chart = alt.Chart(curve).mark_line().encode(
+            x=alt.X("K:Q", title="K (Top-K)"),
+            y=alt.Y("recall_at_k:Q", title="Recall@K"),
+            tooltip=["K:Q", alt.Tooltip("recall_at_k:Q", format=".3f")],
+        ).properties(height=250, title="Recall@K curve (holdout)")
+
+        st.altair_chart(prec_chart, use_container_width=True)
+        st.altair_chart(rec_chart, use_container_width=True)
+
+        prec_k, rec_k = precision_recall_at_k(y_test, p_test, k_capacity)
+        baseline = y_test.mean()
+
+        st.markdown("### Ringkasan untuk K yang dipilih")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Baseline target rate", f"{baseline*100:.2f}%")
+        c2.metric("Precision@K", f"{prec_k*100:.2f}%")
+        c3.metric("Recall@K", f"{rec_k*100:.2f}%")
+
+        st.markdown("### Dashboard akhir (sesuai tujuan proyek)")
         st.markdown(
             f"""
-- **K = {k_capacity}** = kapasitas intervensi (berapa peserta yang bisa di-follow-up).
-- Model memberi **skor peluang** (probabilitas target=1), lalu kita ambil **Top-K** untuk prioritas.
-- Kurva **Precision@K** / **Recall@K** menunjukkan trade-off:
-  - K kecil → precision biasanya lebih tinggi (lebih “tepat sasaran”)
-  - K besar → recall naik (lebih banyak positif yang terjangkau)
-"""
+Proyek ini bertujuan untuk:
+1) memahami pola peserta Dibimbing,  
+2) membangun segmentasi peserta yang akurat (persona), dan  
+3) mengembangkan model prediktif peluang penyaluran kerja untuk keputusan bisnis.
+
+**Interpretasi Top-K:**
+- **K = {k_capacity}** = kapasitas intervensi (jumlah peserta yang bisa di-follow-up).
+- Model memberi skor peluang → kita ambil **Top-K** untuk prioritas outreach.
+- Kurva **Precision@K / Recall@K** menunjukkan trade-off:
+  - K kecil → precision lebih tinggi (lebih tepat sasaran)
+  - K besar → recall naik (lebih banyak positif terjangkau)
+            """
         )
 
-        colp, colr = st.columns(2)
-        with colp:
-            st.pyplot(st.session_state["sup_fig_pr"], use_container_width=True)
-        with colr:
-            st.pyplot(st.session_state["sup_fig_rc"], use_container_width=True)
+        # Uplift table (lebih aman: pakai subset topk_df)
+        model = res["model"]
+        X_all = res["X"]
+        p_all = model.predict_proba(X_all)[:, 1]
 
-        st.write("Tabel Precision@K / Recall@K:")
-        pr_show = pr_df.copy()
-        pr_show["precision_at_k"] = (pr_show["precision_at_k"] * 100).round(2)
-        pr_show["recall_at_k"] = (pr_show["recall_at_k"] * 100).round(2)
-        st.dataframe(pr_show, use_container_width=True)
+        full = df_sup.copy()
+        full["_score"] = p_all
+        full_sorted = full.sort_values("_score", ascending=False).reset_index(drop=True)
+        full_sorted["_is_topk"] = (np.arange(len(full_sorted)) < k_capacity).astype(int)
 
-        st.subheader("Lift & Top-K performance by group (dashboard)")
-        df_eval = X_test.copy()
-        df_eval["y_true"] = y_test
-        df_eval["y_score"] = y_score
+        group_candidates = [c for c in ["Persona", "Product", "Kategori", "Channel", "Motivasi_cluster", "Segmen_karir", "Engagement_level"] if c in full_sorted.columns]
+        group_col = st.selectbox("Breakdown uplift by", group_candidates, index=0, key="uplift_group")
 
-        group_candidates = [c for c in [
-            "cluster_name", "cluster_id",
-            "Segmen_karir", "Motivasi_cluster",
-            "Product", "Kategori", "Channel", "Month", "Region"
-        ] if c in df_eval.columns]
+        base_g = full_sorted.groupby(group_col).agg(
+            baseline_total=("target", "count"),
+            baseline_pos=("target", "sum"),
+        ).reset_index()
 
-        gcol = st.selectbox("Pilih group breakdown", options=group_candidates, index=0, key="sup_group")
-        lift_tbl = group_lift_table(df_eval, gcol, k_capacity)
+        topk_df = full_sorted[full_sorted["_is_topk"] == 1].copy()
+        topk_g = topk_df.groupby(group_col).agg(
+            topk_total=("target", "count"),
+            topk_pos=("target", "sum"),
+        ).reset_index()
 
-        # nicer % columns
-        lift_tbl = lift_tbl.rename(columns={gcol: "group"})
-        lift_tbl["baseline_rate_pct"] = (lift_tbl["baseline_rate"] * 100).round(2)
-        lift_tbl["topk_rate_pct"] = (lift_tbl["topk_rate"] * 100).round(2)
-        st.dataframe(lift_tbl, use_container_width=True)
+        g = base_g.merge(topk_g, on=group_col, how="left").fillna({"topk_total": 0, "topk_pos": 0})
+        g["baseline_rate_pct"] = 100 * g["baseline_pos"] / g["baseline_total"]
+        g["topk_rate_pct"] = np.where(g["topk_total"] > 0, 100 * g["topk_pos"] / g["topk_total"], np.nan)
+        g["lift"] = g["topk_rate_pct"] / (g["baseline_rate_pct"] + 1e-9)
+        g = g.sort_values(["lift", "topk_total"], ascending=[False, False])
 
-        st.subheader("Daftar kandidat Top-K (untuk action)")
-        order = np.argsort(-y_score)
-        k = int(max(1, min(k_capacity, len(order))))
-        top_idx = order[:k]
-        top_df = df_eval.iloc[top_idx].copy()
-        top_df["rank"] = np.arange(1, len(top_df) + 1)
-        cols_show = ["rank", "y_score"]
-        # add some readable columns if present
-        for c in ["Product", "Kategori", "Segmen_karir", "Motivasi_cluster", "cluster_name", "Region", "Channel", "Month"]:
-            if c in top_df.columns and c not in cols_show:
-                cols_show.append(c)
+        st.markdown("### Uplift table (Top-K vs baseline)")
+        st.dataframe(g.head(30), use_container_width=True)
 
-        st.dataframe(top_df[cols_show].sort_values("rank"), use_container_width=True)
-
-    else:
-        st.info("Klik **Run supervised ranking** dulu untuk menampilkan dashboard Top-K.")
+        st.markdown("### Rekomendasi aksi (langsung bisa dipakai bisnis)")
+        top_actions = g[g["topk_total"] > 0].head(10).copy()
+        st.write("Prioritas intervensi (Top-10 group):")
+        st.dataframe(top_actions[[group_col, "topk_total", "topk_pos", "topk_rate_pct", "lift"]], use_container_width=True)
