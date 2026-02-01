@@ -379,11 +379,11 @@ if st.session_state.get("sig_f_prev") != sig_f:
         if k in st.session_state:
             del st.session_state[k]
 
-# ----------------------------
+# ============================
 # Tabs
-# ----------------------------
-tab_overview, tab_eda, tab_cluster, tab_sup = st.tabs(
-    ["Overview", "EDA (Target-driven)", "Clustering (Persona)", "Supervised (Top-K Ranking)"]
+# ============================
+tab_overview, tab_eda, tab_cluster, tab_sup, tab_dash = st.tabs(
+    ["Overview", "EDA (Target-driven)", "Clustering (Persona)", "Supervised (Top-K Ranking)", "Dashboard Akhir (Bisnis)"]
 )
 
 # ----------------------------
@@ -465,7 +465,6 @@ with tab_cluster:
     else:
         run_cluster = st.button("Run clustering", key="btn_cluster_run")
 
-        # cache tied to current filtered signature
         cluster_sig = ("cluster", sig_f, tuple(cat_cols), tuple(num_cols))
         if run_cluster or (st.session_state.get("cluster_done") and st.session_state.get("cluster_sig") == cluster_sig):
             if run_cluster or not st.session_state.get("cluster_done") or st.session_state.get("cluster_sig") != cluster_sig:
@@ -478,7 +477,6 @@ with tab_cluster:
                 svd = TruncatedSVD(n_components=2, random_state=42)
                 X_2d = svd.fit_transform(X_enc)
 
-                # MiniBatchKMeans works with sparse matrices safely
                 km = MiniBatchKMeans(n_clusters=3, random_state=42, n_init=20, batch_size=1024)
                 cluster_id = km.fit_predict(X_enc)
 
@@ -585,8 +583,6 @@ with tab_sup:
         c_reg = st.slider("C (regularization)", 0.1, 5.0, 1.0, 0.1, key="sup_C")
 
     preprocess = build_preprocess(cat_cols, num_cols)
-
-    # solver liblinear is robust for sparse + binary
     model = LogisticRegression(
         max_iter=3000,
         class_weight=("balanced" if class_weight == "balanced" else None),
@@ -661,7 +657,7 @@ with tab_sup:
         m1.metric("PR-AUC (Average Precision)", f"{met['pr_auc']:.4f}")
         m2.metric("ROC-AUC (opsional)", f"{met['roc_auc']:.4f}" if not np.isnan(met["roc_auc"]) else "N/A")
 
-        st.caption("Fokus utama untuk Top-K biasanya PR-AUC + Precision@K/Recall@K/Lift@K (lebih nyambung ke kapasitas bisnis).")
+        st.caption("Fokus utama untuk Top-K biasanya PR-AUC + Precision@K/Recall@K/Lift@K.")
 
         st.subheader("Trade-off curve: Precision@K, Recall@K, Lift@K")
         c_left, c_right = st.columns(2)
@@ -684,7 +680,7 @@ with tab_sup:
             x=alt.X("k:Q", title="K"),
             y=alt.Y("lift_at_k:Q", title="Lift@K"),
             tooltip=["k:Q", alt.Tooltip("lift_at_k:Q", format=".2f")],
-        ).properties(height=260, title="Lift@K (efektivitas vs baseline)")
+        ).properties(height=260, title="Lift@K (vs baseline)")
         st.altair_chart(ch3, use_container_width=True)
 
         st.subheader("Top-K output (untuk eksekusi bisnis)")
@@ -702,58 +698,53 @@ with tab_sup:
             key="dl_topk",
         )
 
-        st.subheader("Dashboard akhir (actionable summary untuk tujuan proyek)")
-        st.write("**1) Segmentasi & pola (target rate by persona/segmen)**")
-        if "Persona" in dfm.columns:
-            df_rate_p = top_rate_by_group(dfm, y_m, "Persona", min_count=10, top_n=20)
-            chp = alt_bar_rate(df_rate_p, "Target rate by Persona")
-            if chp is not None:
-                st.altair_chart(chp, use_container_width=True)
+# ----------------------------
+# Dashboard Akhir (Bisnis) — NEW TAB
+# ----------------------------
+with tab_dash:
+    st.subheader("Dashboard Akhir (Bisnis) — ringkas & actionable")
 
-        if "Segmen_karir" in dfm.columns:
-            df_rate_s = top_rate_by_group(dfm, y_m, "Segmen_karir", min_count=30, top_n=30)
-            chs = alt_bar_rate(df_rate_s, "Target rate by Segmen_karir (Top, min_count=30)")
-            if chs is not None:
-                st.altair_chart(chs, use_container_width=True)
-
-        st.write("**2) Kenapa memilih Top-K segini? (trade-off & kapasitas)**")
-        base_rate = y_m.mean()
-        nearest = curves.iloc[(curves["k"] - int(k_cap)).abs().argsort()[:1]]
-        if len(nearest):
-            nk = int(nearest["k"].iloc[0])
-            st.markdown(
-                f"""
-- **K = {k_cap}** = kapasitas intervensi (berapa peserta yang bisa di-follow up).
-- Baseline positive rate = **{base_rate*100:.2f}%**.
-- Perkiraan di sekitar K≈{nk}:  
-  - Precision@K ≈ **{nearest['precision_at_k'].iloc[0]*100:.2f}%**  
-  - Recall@K ≈ **{nearest['recall_at_k'].iloc[0]*100:.2f}%**  
-  - Lift@K ≈ **{nearest['lift_at_k'].iloc[0]:.2f}×**
-"""
-            )
-
-        st.write("**3) Distribusi Top-K (untuk strategi akuisisi/desain program/intervensi)**")
-        if "Persona" in df_top.columns:
-            dist_top = df_top["Persona"].value_counts().reset_index()
-            dist_top.columns = ["Persona", "count"]
-            chd = alt.Chart(dist_top).mark_bar().encode(
-                y=alt.Y("Persona:N", sort="-x"),
-                x=alt.X("count:Q"),
-                tooltip=["Persona:N", "count:Q"],
-            ).properties(height=220, title="Top-K count by Persona")
-            st.altair_chart(chd, use_container_width=True)
-
-        if "Product" in df_top.columns:
-            dist_prod = df_top["Product"].astype(str).value_counts().head(20).reset_index()
-            dist_prod.columns = ["Product", "count"]
-            chp2 = alt.Chart(dist_prod).mark_bar().encode(
-                y=alt.Y("Product:N", sort="-x"),
-                x=alt.X("count:Q"),
-                tooltip=["Product:N", "count:Q"],
-            ).properties(height=320, title="Top-K count by Product (Top 20)")
-            st.altair_chart(chp2, use_container_width=True)
-
-        st.success(
-            "Kalau mau hasil identik PDF: pastikan dataset sama + definisi target sama. "
-            "Di file ini mismatch akan kelihatan dari distribusi target & PR-AUC/@K."
+    # Use same dfm / y_m as supervised section, but rebuild safely if supervised belum dijalankan
+    dfm_dash = df_f.copy()
+    if st.session_state.get("cluster_done"):
+        dfc = st.session_state["df_clustered"]
+        dfm_dash = dfm_dash.merge(
+            dfc[["_cluster_id", "Persona"]],
+            left_index=True,
+            right_index=True,
+            how="left",
         )
+
+    y_dash, _ = make_target(dfm_dash, target_col=target_col, mode=mode)
+    if y_dash is None:
+        st.error("Target tidak valid untuk dashboard.")
+        st.stop()
+
+    n_all_d, n_pos_d, n_neg_d, base_rate = target_summary(y_dash)
+
+    # KPI line
+    st.write("### KPI utama")
+    kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+    kpi1.metric("Rows aktif", f"{n_all_d:,}")
+    kpi2.metric("Positives", f"{n_pos_d:,}")
+    kpi3.metric("Positive rate", f"{base_rate*100:.2f}%")
+    kpi4.metric("K (capacity)", f"{st.session_state.get('k_capacity', 200)}")
+    if st.session_state.get("sup_done"):
+        met = st.session_state["sup_metrics"]
+        kpi5.metric("PR-AUC", f"{met['pr_auc']:.4f}")
+    else:
+        kpi5.metric("PR-AUC", "Run supervised dulu")
+
+    st.divider()
+
+    # If supervised ready, compute nearest @K stats and show
+    if st.session_state.get("sup_done"):
+        met = st.session_state["sup_metrics"]
+        curves = st.session_state["sup_curves"]
+        df_top = st.session_state["sup_top"]
+        k_cap_now = int(st.session_state.get("k_capacity", 200))
+
+        st.write("### Kualitas model untuk keputusan bisnis")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("PR-AUC", f"{met['pr_auc']:.4f}")
+        m2.metric("ROC-AUC", f"{met[']()
