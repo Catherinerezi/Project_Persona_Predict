@@ -20,21 +20,15 @@ from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-
-# ============================================================
 # Page config
-# ============================================================
 st.set_page_config(
-    page_title="Persona Segmentation & Placement Prediction (PDF-aligned)",
+    page_title="Persona Segmentation & Placement Prediction",
     layout="wide",
 )
 
 alt.data_transformers.disable_max_rows()
 
-
-# ============================================================
 # Altair config (biar chart nggak kepotong / aman di dark mode streamlit)
-# ============================================================
 def _apply_altair_theme():
     # Make charts more robust in Streamlit columns + long labels
     theme = {
@@ -55,10 +49,7 @@ def _apply_altair_theme():
 
 _apply_altair_theme()
 
-
-# ============================================================
 # Helpers
-# ============================================================
 def _safe_str(x):
     if pd.isna(x):
         return ""
@@ -363,10 +354,7 @@ def _nan_safe_metric_value(x):
     except Exception:
         return "N/A"
 
-
-# ============================================================
 # UI: Title + Sidebar Data Source
-# ============================================================
 st.title("Persona Segmentation & Placement Prediction (PDF-aligned)")
 
 with st.sidebar:
@@ -389,10 +377,7 @@ if df is None:
 df = df.copy()
 df.columns = [c.strip() for c in df.columns]
 
-
-# ============================================================
-# Target settings (critical to match PDF)
-# ============================================================
+# Target settings
 with st.sidebar:
     st.header("Target setup (biar match PDF)")
 
@@ -442,10 +427,7 @@ c2.metric("Positives (1)", f"{n_pos:,}")
 c3.metric("Negatives (0)", f"{n_neg:,}")
 c4.metric("Positive rate", f"{pos_rate*100:.2f}%")
 
-
-# ============================================================
 # Global filters
-# ============================================================
 with st.sidebar:
     st.header("Global filters")
     st.caption("Pilih kolom untuk filter → pilih value-nya (mempengaruhi EDA/Clustering/Supervised).")
@@ -496,18 +478,12 @@ if st.session_state.get("sig_f_prev") != sig_f:
         if k in st.session_state:
             del st.session_state[k]
 
-
-# ============================================================
 # Tabs
-# ============================================================
 tab_overview, tab_eda, tab_cluster, tab_sup, tab_dash = st.tabs(
     ["Overview", "EDA (Target-driven)", "Clustering (Persona)", "Supervised (Top-K Ranking)", "Dashboard Akhir (Bisnis)"]
 )
 
-
-# ============================================================
 # Overview
-# ============================================================
 with tab_overview:
     st.subheader("Project goal alignment")
     st.write(
@@ -526,19 +502,12 @@ Proyek ini harus menjawab 3 hal:
     st.subheader("Distribusi target (setelah filter) — sanity check mismatch PDF")
     st.altair_chart(alt_dist_target(y_f, "Distribusi target (setelah filter)"), use_container_width=True)
 
-    st.info(
-        "Kalau hasil kamu beda dari PDF: cek urutan ini → (1) dataset identik, (2) definisi target/mapping, (3) filter aktif, (4) kolom PDF-aligned tersedia."
-    )
-
-
-# ============================================================
 # EDA (Target-driven)
-# ============================================================
 with tab_eda:
     st.subheader("EDA yang selaras tujuan (target-driven)")
 
     # Quick views (yang biasanya dipakai bisnis)
-    st.markdown("### Target rate quick views (umum dipakai bisnis)")
+    st.markdown("### Target rate quick views")
     q1, q2, q3 = st.columns(3)
 
     def _quick_rate(col, title, min_count=30, top_n=15):
@@ -596,10 +565,7 @@ with tab_eda:
     st.subheader("Distribusi target (setelah filter)")
     st.altair_chart(alt_dist_target(y_f, "Distribusi target (setelah filter)"), use_container_width=True)
 
-
-# ============================================================
 # Clustering (Persona)
-# ============================================================
 with tab_cluster:
     st.subheader("Persona clustering (3 cluster, PDF-aligned)")
 
@@ -703,10 +669,7 @@ with tab_cluster:
         if chp is not None:
             st.altair_chart(chp, use_container_width=True)
 
-
-# ============================================================
 # Supervised (Top-K Ranking)
-# ============================================================
 with tab_sup:
     st.subheader("Supervised ranking — Top-K (PDF-aligned)")
 
@@ -830,7 +793,7 @@ with tab_sup:
         m1.metric("PR-AUC (Average Precision)", _nan_safe_metric_value(met.get("pr_auc")))
         m2.metric("ROC-AUC (opsional)", _nan_safe_metric_value(met.get("roc_auc")))
 
-        st.caption("Fokus utama untuk Top-K biasanya PR-AUC + Precision@K/Recall@K/Lift@K (lebih nyambung ke kapasitas bisnis).")
+        st.caption("Fokus utama untuk Top-K biasanya PR-AUC + Precision@K/Recall@K/Lift@K.")
 
         st.subheader("Trade-off curve: Precision@K, Recall@K, Lift@K")
         c_left, c_right = st.columns(2)
@@ -886,10 +849,7 @@ with tab_sup:
             key="dl_topk",
         )
 
-
-# ============================================================
 # Dashboard Akhir (Bisnis)
-# ============================================================
 with tab_dash:
     st.subheader("Dashboard Akhir (Bisnis) — ringkas & actionable")
     st.caption("Tab ini menjawab tujuan proyek: pola peserta → persona → model Top-K → rekomendasi aksi bisnis.")
