@@ -655,7 +655,10 @@ with tab_sup:
         st.subheader("Model quality (ranking-oriented)")
         m1, m2 = st.columns(2)
         m1.metric("PR-AUC (Average Precision)", f"{met['pr_auc']:.4f}")
-        m2.metric("ROC-AUC (opsional)", f"{met['roc_auc']:.4f}" if not np.isnan(met["roc_auc"]) else "N/A")
+        roc = met.get("roc_auc", np.nan)
+        roc_text = "N/A" if (roc is None or (isinstance(roc, float) and np.isnan(roc))) else f"{roc:.4f}"
+        m2.metric("ROC-AUC (opsional)", roc_text)
+
 
         st.caption("Fokus utama untuk Top-K biasanya PR-AUC + Precision@K/Recall@K/Lift@K.")
 
