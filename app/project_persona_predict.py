@@ -1,5 +1,5 @@
 # app.py
-# Persona Segmentation & Placement Prediction (PDF-aligned) — single-file Streamlit
+# Persona Segmentation & Placement Prediction
 # Charts: Altair only (no Plotly). Clustering: 3 clusters + persona naming. Supervised: Top-K dashboard + Dashboard Akhir (Bisnis).
 
 import warnings
@@ -84,7 +84,7 @@ def apply_global_filters(df: pd.DataFrame, filter_cols: list[str], selections: d
 
 def infer_feature_sets(df: pd.DataFrame):
     """
-    PDF-aligned feature candidates (robust to missing columns).
+    feature candidates (robust to missing columns).
     """
     cat_candidates = [
         "Batch",
@@ -259,7 +259,7 @@ def prepare_X(df_in: pd.DataFrame, cat_cols: list[str], num_cols: list[str]) -> 
 
 def persona_name_from_profiles(df: pd.DataFrame, cluster_col: str):
     """
-    Heuristic naming to approximate PDF labels:
+    Heuristic naming to approximate labels:
     - Fresh Graduate Explorer
     - High Engagement Career Switcher
     - Working Professional Upskiller
@@ -355,7 +355,7 @@ def _nan_safe_metric_value(x):
         return "N/A"
 
 # UI: Title + Sidebar Data Source
-st.title("Persona Segmentation & Placement Prediction (PDF-aligned)")
+st.title("Persona Segmentation & Placement Prediction")
 
 with st.sidebar:
     st.header("Data source")
@@ -379,7 +379,7 @@ df.columns = [c.strip() for c in df.columns]
 
 # Target settings
 with st.sidebar:
-    st.header("Target setup (biar match PDF)")
+    st.header("Target setup")
 
     target_col = st.selectbox(
         "Target column",
@@ -499,7 +499,7 @@ Proyek ini harus menjawab 3 hal:
     st.write(f"Sumber data: **{src}**  | Rows aktif: **{len(df_f):,}**")
     st.dataframe(df_f.head(30), use_container_width=True)
 
-    st.subheader("Distribusi target (setelah filter) — sanity check mismatch PDF")
+    st.subheader("Distribusi target (setelah filter) — sanity check")
     st.altair_chart(alt_dist_target(y_f, "Distribusi target (setelah filter)"), use_container_width=True)
 
 # EDA (Target-driven)
@@ -567,15 +567,15 @@ with tab_eda:
 
 # Clustering (Persona)
 with tab_cluster:
-    st.subheader("Persona clustering (3 cluster, PDF-aligned)")
+    st.subheader("Persona clustering (3 cluster)")
 
     cat_cols, num_cols = infer_feature_sets(df_f)
 
-    st.write("**Fitur yang dipakai (sesuai PDF, kalau kolomnya ada):**")
+    st.write("**Fitur yang dipakai (kalau kolomnya ada):**")
     st.code(f"Categorical: {cat_cols}\nNumeric: {num_cols}", language="text")
 
     if len(cat_cols) + len(num_cols) == 0:
-        st.error("Tidak ada feature PDF-aligned yang ditemukan di dataset ini.")
+        st.error("Tidak ada feature yang ditemukan di dataset ini.")
         st.stop()
 
     if len(df_f) < 50:
@@ -620,7 +620,7 @@ with tab_cluster:
 
         st.success(f"Clustering selesai. Persona map: {mapping}")
 
-        st.markdown("### Cluster visualization (TruncatedSVD 2D) — Persona Named (PDF-aligned)")
+        st.markdown("### Cluster visualization (TruncatedSVD 2D) — Persona Named")
         tooltip_cols = ["Persona:N"]
         if "Product" in dfc.columns:
             tooltip_cols.append("Product:N")
@@ -671,7 +671,7 @@ with tab_cluster:
 
 # Supervised (Top-K Ranking)
 with tab_sup:
-    st.subheader("Supervised ranking — Top-K (PDF-aligned)")
+    st.subheader("Supervised ranking — Top-K")
 
     dfm = df_f.copy()
     if st.session_state.get("cluster_done"):
@@ -731,7 +731,7 @@ with tab_sup:
     if min_class < 10:
         st.warning(
             "Kelas minoritas terlalu kecil untuk split+evaluasi yang stabil. "
-            "Longgarkan filter / ganti Target Mode / gunakan dataset yang sama seperti PDF."
+            "Longgarkan filter / ganti Target Mode / gunakan dataset yang sesuai."
         )
         st.stop()
 
